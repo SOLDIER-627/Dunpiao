@@ -18,6 +18,7 @@
 Ticket/
 ├── README.md                 项目入口与当前状态
 ├── TASKS.md                  开发任务与验收条件
+├── scripts/doctor.py         安卓环境自检（只读）
 └── docs/
     ├── architecture/         实现方案
     ├── research/             公开资料调研
@@ -29,6 +30,10 @@ Ticket/
 - 平台顺序：**先大麦，再猫眼**。
 - 调试设备：目前没有现成安卓设备，计划使用模拟器。当前机器未检测到 `adb` 或 Android Studio；安装与 App 登录是开发前置工作。
 - 语言：Python；界面控制选 Appium/UiAutomator2，先做可观察、可暂停的单账号流程。
+
+## 环境自检
+
+运行 `python3 scripts/doctor.py --json`，查看 Python、Java、Android SDK、`adb`、模拟器和已连接设备。返回码 1 表示缺少 `adb` 或模拟器工具；不会修改本机环境。
 
 ## 下一步
 
