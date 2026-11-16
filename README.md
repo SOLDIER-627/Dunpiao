@@ -1,71 +1,12 @@
 # dunpiao 蹲票
 
-在**用户自己的账号**上辅助购买演出票的本地脚本。第一版适配大麦 Android App，随后适配猫眼。当前阶段：仓库骨架已就绪，脚本尚未实现，也未在真实售票中验证。
+目标：在用户自己的账号上辅助购买演出票。**大麦先行，猫眼随后。**用户确认同账号近期已在实体 Android 手机的大麦 App 成功登录；USB 控制与真实订单尚未实测。
 
-> **为什么叫 dunpiao（蹲票）**：核心逻辑就是"开售前蹲守——定时等待、按设定时刻启动、有限重试"，取自抢票圈的说法。
+当前主线是 Mac USB 连接这台真机，先检查在线状态和 scrcpy 人工投屏，再逐步做脱敏页面采样与可停止的单账号 Demo。真机不需要伪装；自动化操作能否被平台接受需单独验证。
 
-## 合规边界
+- [USB 真机方案与可识别性](docs/architecture/2026-11-16-usb-real-phone-plan.md)
+- [任务清单](docs/plan/tasks.md)
+- [真机连接清单](docs/setup/2026-11-16-phone-connection-checklist.md)
+- [雷电云登录实测](docs/research/2026-11-16-ldcloud-login-observation.md)
 
-脚本使用正常 App 界面操作。项目**不包含**验证码代解、接口签名逆向、账号批量注册、代理池或规避平台风控的功能。仓库不保存账号密码、短信验证码或证件号码；配置中的观演人信息只留在本地。
-
-## 项目范围
-
-- 提前配置演出、场次、票档、张数和已在 App 中维护的观演人。
-- 开售前检查登录状态和目标页面，按设定时刻启动。
-- 在 App 中完成选择、尝试下单、失败重试与结果通知；支付由用户确认。
-- 显示每一步状态和失败原因，支持随时停止、限制尝试次数。
-- 大麦先行；猫眼复用调度、日志和配置模块，单独实现页面适配。
-
-## 仓库内容
-
-本仓库保留代码骨架与项目文档（任务、计划、调研、环境记录）；Android SDK、页面样本等大体积工作文件留在本地工作区，不入仓库。
-
-```text
-Dunpiao/
-├── README.md               本文件
-├── ARCHIVE.md              与本地工作区的同步说明
-├── LICENSE                 MIT 许可证
-├── config.example.yaml     配置模板（真实信息走 config.local.yaml，不入仓库）
-├── .gitignore              排除本地配置、日志、SDK 等工作文件
-├── src/dunpiao/            代码（随 DM-03 落地，逐步补齐）
-│   └── __init__.py         包占位
-└── docs/
-    ├── plan/
-    │   ├── tasks.md            任务清单（P0–P5，含分工与决策）
-    │   ├── roadmap.md          架构与阶段规划（两步走）
-    │   └── division-of-labor.md GPT/Claude 分工与页面样本交接约定
-    ├── research/
-    │   ├── 2026-11-16-scalping-ecosystem-survey.md          代抢生态与开源实现调研
-    │   ├── 2026-11-16-multi-account-and-web-console.md      多账号与 Web 控制台选型
-    │   └── 2026-11-16-transfer-and-delivery-mechanisms.md   换绑机制、三证合一与策略分层
-    ├── architecture/
-    │   └── implementation-plan.md  单账号 MVP 实现方案
-    ├── setup/
-    │   └── environment.md          安卓环境安装与验证记录
-```
-
-目标代码结构（DM-03 起）：
-
-```text
-src/dunpiao/
-├── coordinator.py          运行协调器：定时、停止、重试、超时
-├── config.py               配置加载与校验
-├── logging_setup.py        日志与个人信息脱敏
-├── notify.py               结果通知
-└── platforms/
-    ├── base.py             平台适配器接口（页面状态机）
-    ├── damai.py            大麦页面适配
-    └── maoyan.py           猫眼页面适配（P2）
-```
-
-约束：`config.local.*`、`.env`、`logs/`、`screenshots/`、`.android-sdk/`、`.android-avd/` 均已在 `.gitignore` 排除，任何账号与证件信息不得进入 git 历史。
-
-## 技术选型
-
-- 语言：Python；界面控制选 Appium/UiAutomator2，先做可观察、可暂停的单账号流程。
-- 调试设备：模拟器优先；若票务 App 限制模拟器登录，转真机。
-- 平台顺序：先大麦，再猫眼。
-
-## 状态
-
-当前优先级：**本机登录、自有账号的单账号全自动购票流程验证**（`docs/plan/tasks.md` P0，DM-01~07）。单账号跑通后再推进多账号设备池与 Web 控制台；策略按场次入场模式分层（刷证入场 vs 三证合一，见换绑机制调研报告 6.7 节）。
+本地模拟器与雷电云路线已归档于上级 Ticket 工作区。账号登录、短信验证和支付由用户本人完成；不保存密码、验证码或证件信息。默认停在订单提交前，设备断线和未知页面时安全退出。
