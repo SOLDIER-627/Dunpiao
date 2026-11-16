@@ -13,7 +13,7 @@ git fetch .. main
 git checkout FETCH_HEAD -- <路径>   # 如 src/ 下某个新模块、config.example.yaml
 ```
 
-或直接从工作区拷贝文件后 `git add` 提交。归档方向永远是 工作区 → 本仓库 → GitHub，不要反向覆盖工作区。
+或直接从工作区拷贝文件后 `git add` 提交。文档类文件（TASKS、计划、调研、docs/）整文件覆盖同步即可；归档方向永远是 工作区 → 本仓库 → GitHub，不要反向覆盖工作区。
 
 ## 推送到 GitHub
 
