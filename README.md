@@ -25,20 +25,25 @@ Dunpiao/
 ├── README.md               本文件
 ├── ARCHIVE.md              与本地工作区的同步说明
 ├── LICENSE                 MIT 许可证
-├── TASKS.md                任务清单（P0–P5，含分工与决策）
-├── 整体计划.md              架构与阶段规划
-├── 分工计划.md              GPT/Claude 分工与交接约定
-├── 调研_多账号与Web控制台_2026-11-16.md
-├── 调研_换绑机制与交付方案对比_2026-11-16.md
 ├── config.example.yaml     配置模板（真实信息走 config.local.yaml，不入仓库）
 ├── .gitignore              排除本地配置、日志、SDK 等工作文件
 ├── src/dunpiao/            代码（随 DM-03 落地，逐步补齐）
 │   └── __init__.py         包占位
 └── docs/
-    ├── architecture/       实现方案
-    ├── research/           公开资料调研
-    ├── setup/              环境安装与验证记录
-    └── archive/            已被当前目标取代的旧方案
+    ├── plan/
+    │   ├── tasks.md            任务清单（P0–P5，含分工与决策）
+    │   ├── roadmap.md          架构与阶段规划（两步走）
+    │   └── division-of-labor.md GPT/Claude 分工与页面样本交接约定
+    ├── research/
+    │   ├── 2026-11-16-scalping-ecosystem-survey.md          代抢生态与开源实现调研
+    │   ├── 2026-11-16-multi-account-and-web-console.md      多账号与 Web 控制台选型
+    │   └── 2026-11-16-transfer-and-delivery-mechanisms.md   换绑机制、三证合一与策略分层
+    ├── architecture/
+    │   └── implementation-plan.md  单账号 MVP 实现方案
+    ├── setup/
+    │   └── environment.md          安卓环境安装与验证记录
+    └── archive/
+        └── 2026-11-16-anti-scalping-demo-obsolete.md  已废弃的旧方案
 ```
 
 目标代码结构（DM-03 起）：
@@ -65,4 +70,4 @@ src/dunpiao/
 
 ## 状态
 
-当前优先级：**本机登录、自有账号的单账号全自动购票流程验证**（TASKS P0，DM-01~07）。单账号跑通后再推进多账号设备池与 Web 控制台；策略按场次入场模式分层（刷证入场 vs 三证合一，见换绑调研报告 6.7 节）。
+当前优先级：**本机登录、自有账号的单账号全自动购票流程验证**（`docs/plan/tasks.md` P0，DM-01~07）。单账号跑通后再推进多账号设备池与 Web 控制台；策略按场次入场模式分层（刷证入场 vs 三证合一，见换绑机制调研报告 6.7 节）。
