@@ -42,8 +42,6 @@ Dunpiao/
     │   └── implementation-plan.md  单账号 MVP 实现方案
     ├── setup/
     │   └── environment.md          安卓环境安装与验证记录
-    └── archive/
-        └── 2026-11-16-anti-scalping-demo-obsolete.md  已废弃的旧方案
 ```
 
 目标代码结构（DM-03 起）：
