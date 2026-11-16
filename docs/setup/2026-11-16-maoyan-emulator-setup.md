@@ -6,7 +6,7 @@
 
 在访达双击上级 `Ticket/scripts/start-maoyan-emulator.command`。设备使用 Android 15 ARM64 Google Play 镜像。启动脚本检查屏幕三键、Mac 键盘和系统语言；简体中文需在模拟器系统设置里排为首选语言。侧栏三键曾无响应，以**手机画面底部的三键**为准。
 
-首次打开后，在 Google Play 中由用户自行安装猫眼 App、完成登录并打开一场非热门演出的详情页。不在聊天或配置文件中发送密码、验证码、身份证、完整手机号。不要从任意 APK 网站下载猫眼安装包。
+首次打开后，在 [Google Play 的猫眼应用页](https://play.google.com/store/apps/details?id=com.sankuai.movie)由用户自行安装、完成登录并打开一场非热门演出的详情页。应用包名应为 `com.sankuai.movie`。不在聊天或配置文件中发送密码、验证码、身份证、完整手机号。不要从任意 APK 网站下载猫眼安装包。
 
 ## 首次验收记录
 

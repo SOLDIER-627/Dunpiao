@@ -112,6 +112,42 @@
 4. **AI 层要拆开看**：`/api/ai/slider`（滑块偏移求解）= 验证码代解，**红线不采用**；但 YOLO 目标检测/OCR 用于**票档卡片视觉定位**（票价图片化问题）是合规用途，与我们"文本→位置→OCR 三阶梯"兼容，可作为第三阶梯的实现参考（Ultralytics + OpenCV，无权重自动 mock 降级的设计也干净）；
 5. **局限**：Selenium Web 路线（购票受限，同前述结论）；逻辑层是骨架，真实抢票链路空缺——所以它的价值是工程形态参考，不是抢票能力参考。
 
+## 六点八、ticket-purchase 与 damai_grab_votes 代码级精读（第十轮，2026-11-16）
+
+两个仓库同源：[DracoYan-111/damai_grab_votes](https://github.com/DracoYan-111/damai_grab_votes)（443★，2024-03 创建，2025-07 归档）是早期分支；[WECENG/ticket-purchase](https://github.com/WECENG/ticket-purchase)（7541★）持续更新（2025-09 出 v2）。此前 Round-5 只读了 README 与 issue，本轮精读源码（`damai_app_v2.py`、`damai_app_qiang.py`），以下为可直接进入 DM-04~06 实现的结论：
+
+### 一、cn.damai 9.x 资源 ID 清单（2025-09 实测，直接进定位器表）
+
+| 环节 | 资源 ID / 定位 | 备注 |
+|---|---|---|
+| 详情页 CTA | `cn.damai:id/trade_project_detail_purchase_status_bar_container_fl` | 与 NNBS 8.x 时代的 ID 相同——**跨大版本稳定**，资源 ID 优先级结论再获实证 |
+| 票价容器 | `cn.damai:id/project_detail_perform_price_flowlayout` | 容器内按 `className=FrameLayout + index + clickable(true)` 选 |
+| 数量 | `layout_num`（容器）/ `img_jia`（加号） | 张数-1 次加号 |
+| 确定购买 | `cn.damai:id/btn_buy_view` | 备选：textMatches ".*确定.*\|.*购买.*" |
+| 搜索 | `channel_search_text` / `header_search_v2_input` | 冷路径可改为手工导航，省去 |
+| 提交订单 | text="立即提交"（备选"提交"/"确认"） | 文本型，无固定 ID |
+
+### 二、票价图片化的实证与对策
+
+v2 作者明确："APP 更新后**票价的 Text 是空串**，无法再按文本找按钮"，只能改用 `price_index` 索引——与 damai-ticket-helper 的结论交叉验证，**索引兜底从"备选"升级为"必选"**。代价是 index 需人工预配置（我们 config 的 `price_index` 设计正确），三阶梯里"文本匹配"对票档这一环节基本失效，实际顺序：资源 ID 容器 + 索引 → OCR。
+
+### 三、热路径提速技巧（v2 实测）
+
+- **uiautomator2 等价设置**：`waitForIdleTimeout=0`（大麦页面永远不空闲，等空闲是最大拖慢）、`actionAcknowledgmentTimeout=0`、`keyInjectionDelay=0`、`waitForSelectorTimeout=300`、`allowInvisibleElements=true`、`disableWindowAnimation=true`（我们的"关动画"建议获得代码印证）
+- **clickGesture 坐标点击**：定位后取 rect 中心，`mobile: clickGesture duration=30~50ms`，比 `element.click()` 快
+- **显式等待 > 隐式等待**：`WebDriverWait(2s)` 替代 `implicitly_wait(5s)`
+- **多人勾选批处理**：先收集全部观演人坐标，再以 ~10ms 间隔连续点击（几乎一次完成）——对应"users=张数"的勾选优化
+- **重试纪律**：失败后 2s 间隔、最多 3 次、每次重建 driver——与 Round-6"下单重试 ≤3 次"情报一致
+
+### 四、DracoYan 抢票脚本的两个独有技巧
+
+1. **【重要】预选机制压缩热路径**：把想看的场次/票档/张数/观演人在大麦 App 内"预选"（关注/想看），App 会自动记住——热路径退化为 **CTA → 确定 → 提交订单 3 步**，无需选场次票档张数。这是冷路径预配置的最强形式，纳入 P0 设计（比我们原设想"提前固化配置"更进一步：让 App 自己记住）
+2. **微滑动代替点击**：CTA 不可点时用 `swipe(x+50, y, x+52, y+2, 100)` 循环"狂点"——把 tap 实现为 2px 微滑。我们保留"礼貌轮询 CTA"设计，但 swipe-tap 可作为 click 无响应时的备选注入方式
+
+### 五、对渠道选型的反向确认
+
+两者均为 Appium + UiAutomator2 引擎驱动真机/AVD（DracoYan 配置里 deviceName 是真实序列号 + Android 12 真机；WECENG v2 配置示例是 emulator-5554 + Android 16 AVD）。我们选 uiautomator2（python）与它们共享同一底层引擎，无 Appium server 中间层更轻——路线无需更改，Appium 侧的提速设置可在 uiautomator2 里用 `d.settings` 等价实现。
+
 ## 七、来源与证据说明
 
 **政府、警方、检察机关**
