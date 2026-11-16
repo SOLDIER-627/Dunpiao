@@ -100,6 +100,18 @@
 5. **回流监测设计**（README 日志）：二次回流检测、"我知道了"弹窗自动点击、指定场次/周几过滤——P4 余票监控参考；
 6. **红线对照**：仓库含"滑块模拟滑动"脚本——**不采用**（自动化滑块=验证码代解，与人工拖滑块红线冲突）；作者自己也注明"抢票是概率事件，很大程度取决于个人账号"，与账号健康度优先的判断一致。
 
+## 六点七、damaihelper 与 Web 控制台骨架（第八轮，2026-11-16）
+
+[Guyungy/damaihelper](https://github.com/Guyungy/damaihelper)（4481★，2026-08 仍活跃）：大麦/淘票票/缤玩岛多平台抢票"骨架"，**默认 dry-run**、明言"不保证真实抢票效果"——本质是工程框架而非成品脚本。技术栈：React + Ant Design 前端（web-ui）、Python 标准库 http.server 后端、REST API、任务编排器、可选 Selenium、YOLO/CUDA AI 层。
+
+**对我们最有价值的是 P2/P3 Web 控制台的现成参考**（与我们多账号调研里的 Web 控制台规划直接对标）：
+
+1. **API 契约可直接借鉴**：`/api/health`（健康检查）、`GET/POST /api/config`（读写配置）、`POST /api/ticket/start|stop`（任务启停）、`GET /api/ticket/logs?offset=`（增量日志轮询）——与我们 CLI 的 config/probe/run 三件套同构，做 Web 化时按这套契约扩展即可；
+2. **任务编排器形态**：阶段流（stage flow）、可停止、增量日志回传——对应我们的状态机 + 提交闸门；其 `dry_run: true` 默认值与我们 `commit_order=false` 默认停提交前完全同构（两个独立项目收敛到同一安全设计，佐证该设计是社区共识）；
+3. **前端选型**：Ant Design 5 + Vite + 增量日志面板——P3 实现时少走弯路；后端用标准库 http.server（无重依赖），与我们 DM-03 的 stdlib 路线一致，且其 README 明确"本机可 3.14"（stdlib 路线不受 uiautomator2 的 3.14 限制影响）；
+4. **AI 层要拆开看**：`/api/ai/slider`（滑块偏移求解）= 验证码代解，**红线不采用**；但 YOLO 目标检测/OCR 用于**票档卡片视觉定位**（票价图片化问题）是合规用途，与我们"文本→位置→OCR 三阶梯"兼容，可作为第三阶梯的实现参考（Ultralytics + OpenCV，无权重自动 mock 降级的设计也干净）；
+5. **局限**：Selenium Web 路线（购票受限，同前述结论）；逻辑层是骨架，真实抢票链路空缺——所以它的价值是工程形态参考，不是抢票能力参考。
+
 ## 七、来源与证据说明
 
 **政府、警方、检察机关**
