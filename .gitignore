@@ -1,0 +1,19 @@
+# Local credentials and personal data
+config.local.*
+.env
+.env.*
+!*.example.env
+
+# Runtime output
+logs/
+screenshots/
+artifacts/
+*.sqlite3
+*.db
+
+# Python and editor files
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.DS_Store
