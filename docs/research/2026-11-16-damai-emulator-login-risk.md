@@ -84,7 +84,7 @@
 
 | # | 试验 | 结果解读 |
 |---|---|---|
-| D1 | 同一账号在 **Mac Chrome 访问 m.damai.cn 登录** | 成功 → 账号未被打标，拦截源于模拟器设备指纹；同样被拒 → 账号级风控标记（转 D4） |
+| D1 | 同一 AVD 的浏览器访问 m.damai.cn，用同一账号人工登录 | **已完成：网页可登录并接收验证码，App 在验证码前被拒。**这排除账号全面不可用、模拟器全面断网和短信通道全面故障；不能单独证明是哪项 App 安全校验或设备特征触发。 |
 | D2 | **换一个账号**在同一 AVD 登录 | 也被拒 → 设备/环境级拦截；成功 → 账号+设备组合风控 |
 | D3 | 换网络（手机热点）后再试 | 成功 → IP 维度问题（家庭宽带出口被标记可能性低，但需排除） |
 | D4 | 账号级标记：等待数日自然解除，或走大麦客服申诉 | 黑猫投诉案例显示客服未必有效，等待为主 |
@@ -107,6 +107,31 @@
 - **P1 多账号 = 多模拟器不变**：模拟器路径走通后，多账号扩展反而比真机容易（AVD 克隆）；
 - 下单环节遇“访问被拒绝”与登录同源时按 7.2 阶梯处理，**不在开抢日现场调试**（调试窗口提前数天）。
 
+## 八、补充调研：damai-ticket-helper 及其上游（第五轮，2026-11-16）
+
+### 8.1 仓库概览
+
+| 仓库 | 热度 | 定位 |
+|---|---|---|
+| [WECENG/ticket-purchase](https://github.com/WECENG/ticket-purchase) | **7541 stars / 926 forks**，2023-10 创建，2026-05 仍在更新 | 目前**热度最高**的大麦自动化仓：Selenium（Web）+ Appium/uiautomator2（移动端）双端，技术栈与我们完全一致 |
+| [Lzhimie/damai-ticket-helper](https://github.com/Lzhimie/damai-ticket-helper) | 75 stars，2026-09 | 上游的二开版：tkinter 可视化界面 + PyInstaller 便携打包 + **适配大麦 App 9.x 新版界面** |
+
+### 8.2 关键情报
+
+1. **【直接影响 DM-04 设计】大麦新版把日期和票价文字画成了图片，程序读不到**（damai-ticket-helper README 明言），只能按位置点：`session_index` / `price_index` 为第几个卡片（从 0 计）。我们的页面识别不能只靠文本匹配，**位置索引兑底是必备能力**——配置 schema 需增加 `session_index`。
+2. **【热路径机制参考】开售秒抢的检测设计**：每 200ms 轮询 CTA 按钮文字；每 2s 刷新页面（切前后台）＋点击试探判断状态；检测到“已预约”→退回继续刷；“立即预定/立即购买”→立即进入抢票流；缺货→自动切换场次刷新等补货。比我们现规划的 `--watch-cta` 更具体，直接采纳为热路径实现细节。
+3. **【下单风控实证】issue #85（2025-11，与我们同题）**：用户在模拟器上跑 ticket-purchase，日志显示**全流程 UI 操作成功**（选城市→预约→票价→数量→确认→观演人选择），在最后提交环节被“访问被拒绝”拦截。结论：**模拟器能走完整个购票 UI，风控打在服务端下单动作上**；与 GPT 本机“登录安全校验即被拒”是两道不同的闸（登录闸 vs 下单闸）。该 issue 无解答，说明社区也没有现成的模拟器过闸方案。
+4. **多观演人 = 张数，上限 6 张**（damai-ticket-helper 实现，与我们 `users` 数组设计一致，注意 6 张上限）。
+5. 各步骤间隔可自定义（毫秒级）——对应我们的 delays 配置。
+
+### 8.3 对方案的落地修改
+
+- **配置 schema 增加 `session_index`**（场次位置兑底），与 `price_index` 同型；
+- **DM-04 页面识别策略定稿**：文本匹配优先 + 位置索引兑底 + OCR（票档文字图片化时）三阶梯；GPT 采样时务必采集“票价文字为图片”的新版页面样本；
+- **热路径细化**：CTA 轮询间隔 200ms、每 2s 刷新一次（切前后台模拟）、试探点击判态、“已预约→退回重刷”状态机；
+- **P4 余票监控有现成参考**：缺货切场次刷新等待补货的机制在两个仓库中都有实现；
+- 模拟器下单被拒的风险预期不变（8.2-3），S1–S6 阶梯与 S6 保底继续有效。
+
 ## 来源
 
 - damaiTickets `docs/mobile-ticket-logic.md`（2026-03-29 模拟器实测结论、check_session_valid 设计）：https://github.com/yanzilee/damaiTickets/blob/master/docs/mobile-ticket-logic.md
@@ -116,6 +141,9 @@
 - CSDN 问答《大麦模拟器登录失败常见原因解析》（2025-11-28）：https://ask.csdn.net/questions/9021738
 - TrueSight《Android模拟器环境异常：攻防的灰色地带》（2026-04-19）：https://tsight.io/articles/7445308
 - LiLeo505/ticket-puchase 环境要求：https://github.com/LiLeo505/ticket-puchase
+- WECENG/ticket-purchase（热度最高的大麦自动化仓，7541 stars）：https://github.com/WECENG/ticket-purchase
+- WECENG/ticket-purchase issue #85「模拟机总是会遇到访问被拒绝的页面」：https://github.com/WECENG/ticket-purchase/issues/85
+- Lzhimie/damai-ticket-helper（上游二开，适配 App 9.x）：https://github.com/Lzhimie/damai-ticket-helper
 
 ## 2026-11-16 本机核验修订
 
@@ -124,3 +152,13 @@
 上文“模拟器登录大麦总体可行”的结论证据不足：引用的 `damaiTickets` 实测只证明模拟器能启动 App 与探测页面，其登录成功是运行前提，没有展示登录过程。建议按此证据边界解读。上文对策 B 的 `build.prop` 伪装和 `adb remount` 也与对策 D 的“不 root”目标相冲突，本机没有执行。
 
 当前不再反复触发验证码。~~下一步以真实 Android 手机做人工登录对照~~（2026-11-16 确认真机不可用，该步骤取消）。改为第七节的差分诊断（D1 Mac Chrome 登录对照、D2 换账号、D3 换网络）＋方案阶梯（S1–S6），执行记录继续记入 `pagesamples/emulator-login.md`。
+
+### 2026-11-16 D1 补充结果
+
+用户确认：**同一虚拟机的网页版可用同一账号登录，并正常发送、接收验证码**；已安装的大麦 App 仍在发验证码前显示“亲，访问被拒绝”。因此 D1 的实际对照是“同 AVD 浏览器 vs 原生 App”，不是此前计划的 Mac Chrome。下一步先核对 APK 安装渠道与完整性，再考虑 App 专属的版本或环境兼容性；不把网页成功简单等同于某个具体指纹字段触发。当前安装包为 `cn.damai` 9.0.38、`arm64-v8a`，由系统安装器安装，下载目录文件名为“大麦.apk”；这些信息不足以确认其原始下载渠道或官方签名。
+
+APK 一致性复查：虚拟机下载目录中的“大麦.apk”与当前安装的 `cn.damai` 基础 APK 具有相同 SHA-256，说明运行的正是该下载文件；此检查**不能证明文件来自官方**。安装器只记录为 `com.google.android.packageinstaller`。下载渠道待用户确认。
+
+### 正规来源重装后的因果判断（2026-11-16）
+
+用户换用另一份 9.0.38 APK 后仍在验证码发送前进入同一个“亲，访问被拒绝”安全页；新旧 APK 的 SHA-256 不同，确认确实发生安装文件替换。同一 AVD 的浏览器可以登录并收验证码。结合 `sdk_gphone64_arm64`、`ro.kernel.qemu=1` 和 `userdebug/dev-keys`，**App 专属的模拟环境/设备风险校验是高可能解释**；但没有大麦服务端的拒绝原因，不能将结论精确到某个指纹字段，也不能宣称“所有模拟器一律禁止登录”。详见 `pagesamples/emulator-login.md`。

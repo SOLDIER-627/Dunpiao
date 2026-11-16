@@ -62,7 +62,7 @@ Ticket/                       工作区：docs、页面样本、SDK、分工与�
   - `run --watch-cta`：不知道开售时间时守在详情页，等按钮从倒计时变为“立即购买”后进入热路径（超时默认 60s）。
 - **热路径纪律**：城市/日期/场次预选在冷路径完成；开售瞬间只做“点 CTA → 选票档 → 勾观演人 → 提交”；单步等待 ≤2s、关闭系统动画与通知、优先坐标点击；失败重试 = 会话内回退详情页重进，**禁止重建 Appium session**。
 - **提交闸门**：默认 `commit_order=false` 停在提交前；正式抢票需 `--yes` 显式确认（双重保险：CLI flag + 配置字段）。
-- **配置字段沿用 damaiTickets 命名**：`item_url`（自动提取 itemId）、`users`（观演人姓名数组，人数即张数）、`city/date/price` 按 App 原文匹配 + `price_index` 兑底；本地真实配置走 `config.local.yaml`，不入仓库。
+- **配置字段沿用 damaiTickets 命名**：`item_url`（自动提取 itemId）、`users`（观演人姓名数组，人数即张数，上限 6）、`city/date/price` 按 App 原文匹配；**新版大麦把日期/票价画成图片读不到，必须有位置兑底**：`session_index` / `price_index`（第几个卡片，从 0 计，来自 ticket-purchase/damai-ticket-helper 实践）；本地真实配置走 `config.local.yaml`，不入仓库。
 - **模拟器下单可行性是显式验收项**（真机不可用，见《调研_模拟器登录大麦风控》第七节）：按方案阶梯 S1–S3（指纹个性化、降级镜像、行为预热）逐项验证登录与下单；仍被拒则启用 S6 降级模式（自动化验证监控与页面状态机，下单人工完成），同时实测 S4（MuMu Pro Mac）。
 
 ### P1 设备池与多账号（对应 TASKS MA-01~05）
