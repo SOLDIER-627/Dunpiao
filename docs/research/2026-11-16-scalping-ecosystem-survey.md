@@ -148,6 +148,17 @@ v2 作者明确："APP 更新后**票价的 Text 是空串**，无法再按文�
 
 两者均为 Appium + UiAutomator2 引擎驱动真机/AVD（DracoYan 配置里 deviceName 是真实序列号 + Android 12 真机；WECENG v2 配置示例是 emulator-5554 + Android 16 AVD）。我们选 uiautomator2（python）与它们共享同一底层引擎，无 Appium server 中间层更轻——路线无需更改，Appium 侧的提速设置可在 uiautomator2 里用 `d.settings` 等价实现。
 
+## 六点九、HaTickets 源码精读与参考索引（第十一轮，2026-11-16）
+
+[currycan/HaTickets](https://github.com/currycan/HaTickets)（595★，2026-11 仍更新，Apache-2.0）本轮从立场调研深入到源码：uiautomator2 直连（与我们同栈，无 Appium 中间层，~30-60ms/操作）。要点：
+
+1. **时钟信任评估**（`mobile/clock_sync.py`）：开售时间锚定 `time.monotonic()`（免疫 NTP 跳变），offset 警戒 150ms/严重 1000ms，严重时降级为纯 CTA 轮询；时间源可注入——与 NNBS 的 mtop 对时接口互补（接口测 offset + monotonic 锚定）；
+2. **配置 schema**：`probe_only`、`auto_navigate`、`countdown_lead_ms=3000`、`fast_retry_count=8 @80ms`（不重建 driver）、`rush_mode`（信任 price_index、热路径 <2s）、`if_commit_order` 闸门；
+3. **模块化状态机**：state_probe / buy_button_guard（CTA 就绪词 vs 拦截词表）/ recovery_strategies / coords_cache / runtime_lock（防双跑）/ submit_journal / run_report——DM-04 的模块划分直接对标；
+4. **Desktop/Tauri mtop 直调路线官方废弃**（baxia 凭证伪造、UA 伪装、代理——均红线），再次反向确认我们的边界。
+
+历轮全部参考仓库已整理为单一入口索引：**`抢票参考仓库索引_2026-11-16.md`**（含五篇重点精读档案、简档表、跨仓库收敛结论、待跟进清单），后续实现直接查该索引。
+
 ## 七、来源与证据说明
 
 **政府、警方、检察机关**
