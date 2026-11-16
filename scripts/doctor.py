@@ -40,15 +40,22 @@ def adb_devices(adb: str | None) -> list[dict[str, str]]:
 
 
 def collect() -> dict[str, object]:
+    project_root = Path(__file__).resolve().parent.parent
+    project_sdk = project_root / ".android-sdk"
     sdk_candidates = [
+        str(project_sdk),
         os.environ.get("ANDROID_HOME"),
         os.environ.get("ANDROID_SDK_ROOT"),
         str(Path.home() / "Library/Android/sdk"),
     ]
     sdk_roots = [str(Path(p).expanduser()) for p in sdk_candidates if p and Path(p).expanduser().exists()]
-    adb = shutil.which("adb")
-    emulator = shutil.which("emulator")
-    sdkmanager = shutil.which("sdkmanager")
+    def tool(name: str, relative: str) -> str | None:
+        local_path = project_sdk / relative
+        return str(local_path) if local_path.exists() else shutil.which(name)
+
+    adb = tool("adb", "platform-tools/adb")
+    emulator = tool("emulator", "emulator/emulator")
+    sdkmanager = tool("sdkmanager", "cmdline-tools/latest/bin/sdkmanager")
     return {
         "python": run_version([shutil.which("python3") or "python3", "--version"]),
         "java": run_version([shutil.which("java") or "java", "-version"]),

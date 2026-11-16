@@ -17,3 +17,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .DS_Store
+
+# Project-local Android SDK and virtual devices
+.android-sdk/
+.android-avd/
