@@ -135,10 +135,11 @@ def confirm_page_ready_u2(d) -> bool:
 
 
 class Runner:
-    def __init__(self, d, out: Path, expected_total: str):
+    def __init__(self, d, out: Path, expected_total: str, target_price=None):
         self.d = d
         self.out = out
         self.expected = Decimal(expected_total)
+        self.target_price = target_price
         self.out.mkdir(parents=True, exist_ok=True)
         self.w, self.h = d.window_size()
 
@@ -207,8 +208,12 @@ class Runner:
         return None
 
     # ---- Phase 3：SKU 单 dump 取票价+确定按钮双坐标（上游 price_selector 同款）----
-    def sku_coords(self, root):
+    # 优先按价格文本匹配（开售后票卡有 ¥380 文本，比索引可靠；实测教训
+    # 2026-11-18 sandy：预约态实测坐标开售后面板布局变了，首批点到邻档，
+    # 靠重测才回到目标档）；文本匹配不到（预约态价格文本为空）才用 price_index。
+    def sku_coords(self, root, target_price=None):
         price_xy = buy_xy = None
+        target = str(target_price).strip() if target_price else None
         for node in root.iter("node"):
             rid = node.get("resource-id") or ""
             if buy_xy is None and rid == BTN_BUY:
@@ -221,7 +226,19 @@ class Runner:
                     if c.get("class") == "android.widget.FrameLayout"
                     and c.get("clickable") == "true"
                 ]
-                if 0 <= self.price_index < len(cards):
+                if target:
+                    for c in cards:
+                        texts = " ".join(
+                            (k.get("text") or "") for k in c.iter("node")
+                        )
+                        if target in texts and re.search(
+                            r"[¥￥]\s*" + re.escape(target), texts
+                        ):
+                            b = parse_bounds(c.get("bounds") or "")
+                            if b and on_screen(b, self.w, self.h):
+                                price_xy = center(b)
+                                break
+                if price_xy is None and 0 <= self.price_index < len(cards):
                     b = parse_bounds(cards[self.price_index].get("bounds") or "")
                     if b and on_screen(b, self.w, self.h):
                         price_xy = center(b)
@@ -371,7 +388,7 @@ def main() -> int:
     # 上游 orchestrator.py:922 —— 关闭 u2 内部等待，避免隐式阻塞
     d.settings["wait_timeout"] = 0
     d.settings["operation_delay"] = (0, 0)
-    r = Runner(d, out, args.expected_total)
+    r = Runner(d, out, args.expected_total, target_price=cfg.get("price"))
     if not isinstance(cfg.get("price_index"), int) or isinstance(cfg.get("price_index"), bool):
         r.log("STOP: config.local.jsonc 缺少已确认的 price_index（用向导 capture 后 apply 写入）")
         return 1
@@ -542,12 +559,12 @@ def main() -> int:
             time.sleep(0.4)
         if price_xy is None:
             root, rep = r.snap("s2_sku")
-            price_xy, buy_xy = r.sku_coords(root)
+            price_xy, buy_xy = r.sku_coords(root, r.target_price)
             if price_xy is None:
                 # 上游 price_selector：卡片可能未加载完，0.3s 后重 dump 一次
                 time.sleep(0.3)
                 root, rep = r.snap("s2_sku_retry")
-                price_xy, buy_xy = r.sku_coords(root)
+                price_xy, buy_xy = r.sku_coords(root, r.target_price)
             if price_xy is None or buy_xy is None:
                 r.log(f"STOP: SKU 坐标缺失（price_index={r.price_index}，"
                       f"price={price_xy}, buy={buy_xy}）——票档序号可能超出实际票卡数")
@@ -570,7 +587,7 @@ def main() -> int:
             # 不爽的时延区；仍失败才走元素回退
             r.log("s2: 缓存坐标未确认，重测后再连点一轮")
             root, rep = r.snap("s2_remeasure")
-            p2, b2 = r.sku_coords(root)
+            p2, b2 = r.sku_coords(root, r.target_price)
             if p2 and b2:
                 price_xy, buy_xy = p2, b2
                 if r.shell_price_and_buy_until_confirm(price_xy, buy_xy):
@@ -679,7 +696,10 @@ def main() -> int:
     r.tap(order["submit_button"]["bounds"], "立即提交")
 
     # ---- 5) 收银台即停（上游同款思路：轻量轮询 activity，命中才 dump 取证）----
-    deadline = time.monotonic() + 8.0
+    # 实测（2026-11-18 sandy 开售）：提交点击后大麦可能停在 DmOrderActivity
+    # 「提交中」超过 8s，之后才跳收银台；放宽到 20s，期间若出现
+    # 「订单已提交/提交中」文本视为仍在推进继续等
+    deadline = time.monotonic() + 20.0
     act = ""
     while time.monotonic() < deadline:
         act = d.app_current().get("activity", "")
