@@ -15,6 +15,8 @@ description: 从大麦 App 当前页面提取演出基本信息（标题/场馆/
 
 ## 如何提取
 
+支持平台：大麦（`cn.damai`）与猫眼（`com.sankuai.movie`），按前台包名自动分流。
+
 工具：`scripts/show_info.py`（只读：一次 `dump_hierarchy` + 纯解析，不发出任何点击）
 
 ```bash

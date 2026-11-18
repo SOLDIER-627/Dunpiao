@@ -5,6 +5,9 @@ description: Configure dunpiao for a new Damai show (新演出预检). Use when 
 
 # 新演出 AI 化确认（dunpiao 新演出预检向导）
 
+> 适用范围：**仅大麦**（`show_wizard` 依赖大麦资源 ID）。猫眼页面信息提取请用
+> `show-info-extract` skill。
+
 > 使用方式与示例提示词见 [docs/AI助手配置.md](../../../docs/AI助手配置.md)。
 
 工具：`src/dunpiao/show_wizard.py`。两步模式：**capture（只读）→ AI 与用户逐项确认 → apply（写配置）**。
