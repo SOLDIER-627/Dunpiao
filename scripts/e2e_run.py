@@ -27,9 +27,47 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.dunpiao import probe  # noqa: E402
+from src.dunpiao import clock_sync  # noqa: E402
 
 POLL_PAGE = 0.2   # 页面态轮询间隔（上游 wait_for_page_state 默认）
 POLL_FAST = 0.05  # 就绪检查轮询间隔（上游 poll_until 默认）
+
+# ---- buy_button_guard 文案护栏（照抄上游 buy_button_guard.py，含 issue 注记）----
+# 只有可购文案才视为安全；预约/预售类文案一律拦截。本机 Canvas 自绘 CTA 无文案
+# 节点时由像素闸门决定；一旦出现文案则必须过文案护栏。
+SAFE_TEXTS = frozenset({
+    "立即购买", "立即购票", "立即抢票", "立即预定", "立即预订",  # issue #29
+    "Book Now",  # 国际化兑底（issue #29）
+    "选座购买", "购买", "抢票", "预定",
+})
+BLOCKED_TEXTS = frozenset({
+    "预约抢票", "预约", "预售", "即将开抢", "待开售", "未开售", "提交抢票预约",
+})
+
+
+def cta_text_guard(root, bounds):
+    """决策点文案护栏：CTA 区域内出现 BLOCKED 文案则拒绝点击。
+
+    返回 (allow, note)。无任何文案节点（本机 Canvas 自绘常态）→ 放行给像素闸门。
+    """
+    if not bounds:
+        return True, "no_bounds"
+    x1, y1, x2, y2 = bounds
+    note = []
+    for n in root.iter("node"):
+        text = (n.get("text") or "").strip()
+        if not text:
+            continue
+        nb = parse_bounds(n.get("bounds"))
+        if not nb:
+            continue
+        # 与 CTA 容器区域相交才纳入护栏范围
+        if nb[0] < x2 and nb[2] > x1 and nb[1] < y2 and nb[3] > y1:
+            if text in BLOCKED_TEXTS:
+                return False, f"blocked_text:{text}"
+            if text in SAFE_TEXTS:
+                note.append(f"safe_text:{text}")
+    return True, ",".join(note) or "no_text"
 
 
 def parse_bounds(s):
@@ -119,6 +157,18 @@ def main() -> int:
         "--clear-record", action="store_true",
         help="人工已取消/处理完订单后闭环记录（标记 cancelled_by_user，闸门重新放行）",
     )
+    ap.add_argument(
+        "--wait-open", metavar="HH:MM|YYYY-MM-DD HH:MM",
+        help="开售等待模式：开售时刻前只在详情页待命，到点后才开始点击",
+    )
+    ap.add_argument(
+        "--countdown-lead-ms", type=int, default=3000,
+        help="开售前多少毫秒开始预轮询（上游 config.py countdown_lead_ms 默认 3000）",
+    )
+    ap.add_argument(
+        "--ignore-clock-trust", action="store_true",
+        help="时钟信任为 severe 时仍然继续（默认拒绝，上游语义为降级/拒绝）",
+    )
     args = ap.parse_args()
 
     out = ROOT / "logs" / f"e2e_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -148,7 +198,7 @@ def main() -> int:
 
     # ---- 0) 自恢复到详情页（BACK 后 deadline 轮询，不点任何业务按钮）----
     root, rep = r.snap("s0_check")
-    for i in range(3):
+    for i in range(4):
         if rep["state"] == "detail_page":
             break
         if rep["state"].startswith("sku") or rep["state"] == "order_confirm_page":
@@ -157,31 +207,114 @@ def main() -> int:
             root, rep = r.wait_until(
                 lambda rt, p: p["state"] == "detail_page",
                 f"s0_back_{i}", timeout=3.0, poll_interval=POLL_PAGE,
-            ) or (None, rep)
-            if root is None:
-                break
+            )
+            # 超时不 break：下一轮继续 BACK（上游 _recover_to_navigation_start 阶梯）
         else:
             break
     if rep.get("state") != "detail_page":
         r.log(f"STOP: 不在详情页（state={rep.get('state')}）——请手动打开目标演出详情页后重跑")
         return 1
 
-    # ---- 1) CTA 亮橙闸门（决策点，像素验证）→ 点击 → 立即轮询 SKU ----
-    root, rep = r.wait_until(
-        lambda rt, p: p["cta"].get("likely_active") is True,
-        "s1_waitcta", timeout=5.0, poll_interval=POLL_PAGE, pixel=True,
-    )
+    # ---- 0.5) 开售等待模式（上游 wait_for_sale_start 骨架：clock_sync + lead 轮询）----
+    if args.wait_open:
+        raw = args.wait_open
+        try:
+            rough_wall = datetime.datetime.now().astimezone()
+            if len(raw) > 5:
+                naive = datetime.datetime.strptime(raw, "%Y-%m-%d %H:%M")
+            else:
+                # strptime("%H:%M") 默认年份 1900（实测踩坑：目标落到过去、倒计时为负、提前点击）
+                naive = datetime.datetime.combine(
+                    rough_wall.date(), datetime.datetime.strptime(raw, "%H:%M").time()
+                )
+        except ValueError:
+            r.log(f"STOP: 无法解析开售时刻 {raw!r}（支持 HH:MM 或 YYYY-MM-DD HH:MM）")
+            return 1
+        obs = clock_sync.sample_clock()
+        # 实测踩坑：anchor 两采样点必须紧邻且在 sample_clock 之后——
+        # sntp 耗时 1~3s，夹在中间会让 deadline 整体晚同样多（首次实测晚 1.77s）
+        anchor_wall = datetime.datetime.now().astimezone()
+        anchor_mono = time.monotonic()
+        target = naive.replace(tzinfo=anchor_wall.tzinfo)
+        if target <= anchor_wall:
+            target += datetime.timedelta(days=1)  # 已过 → 明天
+        dl = clock_sync.build_monotonic_sale_deadline(
+            target, anchor_wall, anchor_mono, obs,
+        )
+        r.log(f"clock: trust={dl.trust_level}({dl.trust_reason}) "
+              f"source={obs.source}/{obs.detail} 开售={target:%Y-%m-%d %H:%M:%S%z}")
+        if dl.degrade_to_cta and not args.ignore_clock_trust:
+            r.log("STOP: 时钟信任 severe（未同步/偏移过大）——默认拒绝；"
+                  "确信无误可用 --ignore-clock-trust")
+            return 1
+        lead = args.countdown_lead_ms / 1000.0
+        # a) lead 之前：详情页待命，零点击零 dump；0.05s 粒度避免 sleep 过冲累积漂移
+        #    （上游 sale_waiter 同款 sleep(min(0.05, remaining))，实测 1s 粒度会漂 ~1.7s/百秒）
+        while True:
+            remaining = dl.remaining_seconds(time.monotonic())
+            if remaining <= lead:
+                break
+            time.sleep(min(0.05, remaining - lead))
+        r.log(f"wait-open: 进入 lead 窗口（{args.countdown_lead_ms}ms），prewarm 取基线快照")
+        # b) lead 窗口：prewarm 快照（只读）——坐标/像素基线/文案护栏，供 T0 直点
+        root, rep = r.snap("s1_prewarm", pixel=True)
+        if not rep["cta"].get("container_present"):
+            r.log("STOP: prewarm 时 CTA 容器不可见——页面结构异常，不盲等")
+            return 1
+        prewarm_ok = rep["cta"].get("likely_active") is True
+        allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
+        if not allow:
+            prewarm_ok = False
+            r.log(f"wait-open: prewarm 文案护栏拦截（{note}）——T0 后走验证路径")
+        else:
+            r.log(f"wait-open: prewarm 就绪（likely_active={prewarm_ok}，{note}）")
+        # c) 到点：deadline 前 0.05s 粒度待命（上游同款 min(0.05, remaining)）
+        while True:
+            remaining = dl.remaining_seconds(time.monotonic())
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+        r.log("wait-open: 到点，进入点击窗口")
+        # c2) T0 直点前廉价闸门（上游 _scheduled_sale_click_gate 思路）：
+        #     只验 activity 未变（~50ms），不做全量 dump（~0.4s 会吃掉 T0 窗口）
+        if prewarm_ok and "ProjectDetailActivity" not in d.app_current().get("activity", ""):
+            prewarm_ok = False
+            r.log("wait-open: T0 前 activity 变化，放弃直点走验证路径")
+
+    # ---- 1) CTA 点击：T0 直点（prewarm）优先，否则亮橙闸门 + 文案护栏 ----
+    root = None
+    if args.wait_open and prewarm_ok:
+        r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA（prewarm T0 直点）")
+        root, rep = r.wait_until(
+            lambda rt, p: p["state"].startswith("sku"),
+            "s1_after_t0", timeout=3.0, poll_interval=POLL_FAST,
+        )
+        if root is not None:
+            r.log("s1: T0 直点进入 SKU 页")
     if root is None:
-        r.log(f"STOP: CTA 未呈亮橙可购态（appearance={rep['cta'].get('appearance_hint')}）")
-        return 1
-    r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA")
-    root, rep = r.wait_until(
-        lambda rt, p: p["state"].startswith("sku"),
-        "s1_after", timeout=2.0, poll_interval=POLL_FAST,
-    )
-    if root is None:
-        r.log(f"STOP: 点击 CTA 后未进 SKU 页（state={rep['state']}）")
-        return 1
+        root, rep = r.wait_until(
+            lambda rt, p: p["cta"].get("likely_active") is True,
+            "s1_waitcta",
+            timeout=5.0 if not args.wait_open else 8.0,
+            poll_interval=POLL_FAST, pixel=True,
+        )
+        if root is None:
+            r.log(f"STOP: CTA 未呈亮橙可购态（appearance={rep['cta'].get('appearance_hint')}）")
+            return 1
+        allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
+        if not allow:
+            r.log(f"STOP: CTA 文案护栏拦截（{note}）——疑似预约/预售态，不点击")
+            return 1
+        if note and note != "no_text":
+            r.log(f"s1: CTA 文案护栏通过（{note}）")
+        r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA")
+        root, rep = r.wait_until(
+            lambda rt, p: p["state"].startswith("sku"),
+            "s1_after", timeout=2.0, poll_interval=POLL_FAST,
+        )
+        if root is None:
+            r.log(f"STOP: 点击 CTA 后未进 SKU 页（state={rep['state']}）")
+            return 1
     r.log("s1: 进入 SKU 页")
 
     # ---- 2) 等票档渲染且签名稳定（标签后于 bounds 渲染，连续 3 轮不变才判定）----
@@ -223,6 +356,10 @@ def main() -> int:
     )
     if root is None:
         r.log(f"STOP: 确定按钮未亮橙（mean={rep['cta'].get('mean_rgb')}）")
+        return 1
+    allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
+    if not allow:
+        r.log(f"STOP: 确定按钮文案护栏拦截（{note}）")
         return 1
     r.tap(rep["cta"]["container_bounds"], "SKU 确定按钮")
     root, rep = r.wait_until(
