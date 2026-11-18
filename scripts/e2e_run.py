@@ -243,13 +243,17 @@ def main() -> int:
     # ---- 4) 单次提交闸门（E2E-05）：先记录后点击，同演出不盲重试 ----
     gate = ROOT / "logs" / "submit_record.json"
     records = json.loads(gate.read_text(encoding="utf-8")) if gate.exists() else []
-    prior = [x for x in records if x.get("show_tag") == args.show_tag]
-    if prior and not args.force_override_once:
-        r.log(f"STOP: 演出 {args.show_tag} 已有提交记录（{prior[-1]['time']}，status={prior[-1].get('status')}）；"
+    # 只有活跃未处理的记录才拦截；cancelled_by_user / 历史记录不拦
+    active = [
+        x for x in records
+        if x.get("show_tag") == args.show_tag
+        and x.get("status") in ("submitted_intent", "awaiting_user_payment")
+    ]
+    if active and not args.force_override_once:
+        r.log(f"STOP: 演出 {args.show_tag} 有一笔活跃待处理的提交（{active[-1]['time']}，status={active[-1].get('status')}）；"
               f"若订单已取消/处理完，先运行: .venv/bin/python scripts/e2e_run.py --clear-record；"
               "或本次覆盖用 --force-override-once")
         return 1
-    records = [x for x in records if x.get("show_tag") != args.show_tag]
     records.append({
         "time": datetime.datetime.now().isoformat(timespec="seconds"),
         "show_tag": args.show_tag,
