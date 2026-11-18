@@ -33,6 +33,8 @@ def main() -> int:
     )
     engine.add_common_args(ap)
     engine.add_rush_args(ap)
+    ap.add_argument("--simulate", action="store_true",
+                    help="模拟演练：CTA 处于预约/未开售态时仍点击（不提交）")
     args = ap.parse_args()
     return engine.run(args, mode="rush")
 

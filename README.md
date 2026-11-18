@@ -9,14 +9,16 @@
 **合规红线**：不做验证码代解、签名逆向、接口直调、代理池、批量注册、自动支付；
 付款永远本人手动；验证/滑块出现即停交人工。自动化操作可能违反平台用户协议，风险自负。
 
-**支持范围**：大麦 App + 安卓实体手机（USB 调试）+ macOS/Linux；
-**不支持**支持选座的演出（座位图）、模拟器/云手机（实测风控拒绝）、多账号。
+**支持范围**：安卓实体手机（USB 调试）+ macOS/Linux
+- **抢票**：大麦（`cn.damai`）+ **猫眼（`com.sankuai.movie`）**，同一入口按前台包名自动分流
+- **回流**：大麦（猫眼待接入）
+- **不支持**：支持选座的演出（座位图）、模拟器/云手机（实测风控拒绝）、多账号
 
 ## 两种模式
 
 | 模式 | 入口 | 用途 | 触发条件 |
 |---|---|---|---|
-| **抢票** | `scripts/rush.py` | 开售准点抢（T0 直击） | `--wait-open HH:MM` 时钟倒计时到点 |
+| **抢票** | `scripts/rush.py` | 开售准点抢（T0 直击），大麦 + 猫眼 | `--wait-open HH:MM` 时钟倒计时到点 |
 | **回流** | `scripts/reflow.py` | 缺货登记蹲回流票 | 目标票档「缺货登记」消失 |
 
 两条路径触发后走**同一套执行链**：CTA → 确定 → 订单页全字段核对 →（`--submit`）提交 → 收银台即停 → 人工付款。
@@ -161,7 +163,8 @@ docs/用途声明与免责.md    用途声明、免责、合规、隐私
 scripts/rush.py          抢票入口
 scripts/reflow.py        回流入口
 scripts/show_info.py     页面信息提取（只读）
-src/dunpiao/engine.py    两模式共用执行引擎
+src/dunpiao/engine.py    两模式共用执行引擎（大麦/猫眼平台分支）
+src/dunpiao/maoyan.py    猫眼定位层（文本→最近可点击祖先）
 src/dunpiao/reflow.py    回流监听核心
 src/dunpiao/runtime_lock.py  单实例锁
 src/dunpiao/clock_sync.py    开售时钟（抢票用）

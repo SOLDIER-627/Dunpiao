@@ -44,9 +44,45 @@ from src.dunpiao import clock_sync  # noqa: E402
 from src.dunpiao import coords_cache  # noqa: E402
 from src.dunpiao import reflow  # noqa: E402
 from src.dunpiao import runtime_lock  # noqa: E402
+from src.dunpiao import maoyan as MY  # noqa: E402
 
 POLL_PAGE = 0.2   # 页面态轮询间隔（上游 wait_for_page_state 默认）
 POLL_FAST = 0.05  # 就绪检查轮询间隔（上游 poll_until 默认）
+
+
+def _maoyan_order_step(d, r, root_m, info, args) -> int:
+    """猫眼订单页：核对金额/票档/数量 →（--submit）点「立即支付」。"""
+    r.mark("order_confirm")
+    line = info.get("tier_line") or {}
+    amount = info.get("amount")
+    r.log(f"s3: 猫眼订单页 金额={amount!r} 票档={line.get('name')!r} "
+          f"单价={line.get('price')!r} 数量={line.get('qty')}")
+    def _norm_amt(v):
+        try:
+            return round(float(str(v).replace(",", "")), 2)
+        except (TypeError, ValueError):
+            return None
+
+    if args.expected_total and amount and _norm_amt(amount) != _norm_amt(args.expected_total):
+        r.log(f"STOP: 猫眼金额不符（页面 {amount} != 期望 {args.expected_total}）——不提交")
+        return 1
+    sub = info.get("submit")
+    if sub is None:
+        r.log("STOP: 猫眼订单页未找到「立即支付」")
+        return 1
+    r.log(f"s3: 提交按钮 {sub['hit']!r} @{sub['center']}")
+    r.mark("verified")
+    if not args.submit:
+        r.log("RESULT: ✅ 猫眼到订单页且核对通过（未提交；加 --submit 才点立即支付）")
+        return 0
+    r.tap(sub["bounds"], sub["hit"])
+    r.mark("submit_tap")
+    time.sleep(2.0)
+    root_after, _ = r.snap("s6_maoyan")
+    after = MY.page_info(root_after)
+    r.log(f"s4: 提交后 activity={d.app_current().get('activity')} "
+          f"（只读，不再点击）")
+    return 0
 
 
 def cfg_serial_hint() -> str:
@@ -470,6 +506,7 @@ def run(args, mode: str = "rush") -> int:
               "先停掉它（kill <pid>）再重跑")
         return 1
     d = u2.connect(args.serial)
+    platform = "maoyan" if d.app_current().get("package") == MY.PACKAGE else "damai"
     cfg = json.loads(re.sub(r"//[^\n]*", "", (ROOT / "config.local.jsonc").read_text("utf-8")))
     # 上游 orchestrator.py:922 —— 关闭 u2 内部等待，避免隐式阻塞
     d.settings["wait_timeout"] = 0
@@ -488,39 +525,55 @@ def run(args, mode: str = "rush") -> int:
           + f"上游 fast_pipeline 方法）===")
 
     # ---- 0) 自恢复到详情页（缓存命中时 activity 快查即可，跳过 dump）----
-    cache = None if args.no_cache else coords_cache.load(ROOT, args.cache_key)
-    cache_ok = bool(
-        cache
-        and cache.get("screen") == [r.w, r.h]
-        and cache.get("price_index") == r.price_index
-        and all(point_on_screen(cache.get(k), r.w, r.h)
-                for k in ("cta_xy", "price_xy", "buy_xy"))
-    )
-    if cache and not cache_ok:
-        r.log("s0: 坐标缓存校验未过（屏尺寸/price_index/坐标屏内）——走 dump 路径")
-    if cache_ok and "ProjectDetailActivity" in d.app_current().get("activity", ""):
-        r.log("s0: 详情页（activity 快查）+ 缓存校验通过，跳过 dump")
-    else:
-        cache_ok = False
-        root, rep = r.snap("s0_check")
-        for i in range(4):
-            if rep["state"] == "detail_page":
+    if platform == "maoyan":
+        for i in range(3):
+            root_m, _ = r.snap(f"s0_{i}")
+            st = MY.page_info(root_m)["state"]
+            if st in ("detail_page", "order_confirm"):
+                r.log(f"s0: 猫眼 {st}（第 {i} 次判定）")
                 break
-            if rep["state"].startswith("sku") or rep["state"] == "order_confirm_page":
-                r.log(f"s0: 当前 {rep['state']}，BACK 返回详情页")
-                d.shell("input keyevent 4")
-                root, rep = r.wait_until(
-                    lambda rt, p: p["state"] == "detail_page",
-                    f"s0_back_{i}", timeout=3.0, poll_interval=POLL_PAGE,
-                )
-            else:
-                break
-        if rep.get("state") != "detail_page":
-            r.log(f"STOP: 不在详情页（state={rep.get('state')}）——请手动打开目标演出详情页后重跑")
+            r.log(f"s0: 当前 {st}，BACK 返回详情页")
+            d.shell("input keyevent 4")
+            time.sleep(0.8)
+        else:
+            r.log("STOP: 未回到猫眼详情页")
             return 1
-        # 恢复到详情页后，缓存校验依然成立（屏尺寸/price_index/坐标已验过）
-        if cache:
-            cache_ok = True
+    cache_ok = False
+    if platform != "maoyan":
+        # 大麦 s0：缓存校验 + probe 状态判定 + BACK 阶梯
+        cache = None if args.no_cache else coords_cache.load(ROOT, args.cache_key)
+        cache_ok = bool(
+            cache
+            and cache.get("screen") == [r.w, r.h]
+            and cache.get("price_index") == r.price_index
+            and all(point_on_screen(cache.get(k), r.w, r.h)
+                    for k in ("cta_xy", "price_xy", "buy_xy"))
+        )
+        if cache and not cache_ok:
+            r.log("s0: 坐标缓存校验未过（屏尺寸/price_index/坐标屏内）——走 dump 路径")
+        if cache_ok and "ProjectDetailActivity" in d.app_current().get("activity", ""):
+            r.log("s0: 详情页（activity 快查）+ 缓存校验通过，跳过 dump")
+        else:
+            cache_ok = False
+            root, rep = r.snap("s0_check")
+            for i in range(4):
+                if rep["state"] == "detail_page":
+                    break
+                if rep["state"].startswith("sku") or rep["state"] == "order_confirm_page":
+                    r.log(f"s0: 当前 {rep['state']}，BACK 返回详情页")
+                    d.shell("input keyevent 4")
+                    root, rep = r.wait_until(
+                        lambda rt, p: p["state"] == "detail_page",
+                        f"s0_back_{i}", timeout=3.0, poll_interval=POLL_PAGE,
+                    )
+                else:
+                    break
+            if rep.get("state") != "detail_page":
+                r.log(f"STOP: 不在详情页（state={rep.get('state')}）——请手动打开目标演出详情页后重跑")
+                return 1
+            # 恢复到详情页后，缓存校验依然成立（屏尺寸/price_index/坐标已验过）
+            if cache:
+                cache_ok = True
 
     # ---- 0.5) 开售等待模式（上游 wait_for_sale_start 骨架：clock_sync + lead 轮询）----
     prewarm_ok = False
@@ -560,18 +613,28 @@ def run(args, mode: str = "rush") -> int:
             if remaining <= lead:
                 break
             time.sleep(min(0.05, remaining - lead))
-        r.log(f"wait-open: 进入 lead 窗口（{args.countdown_lead_ms}ms），prewarm 取基线快照")
-        root, rep = r.snap("s1_prewarm", pixel=True)
-        if not rep["cta"].get("container_present"):
-            r.log("STOP: prewarm 时 CTA 容器不可见——页面结构异常，不盲等")
-            return 1
-        prewarm_ok = rep["cta"].get("likely_active") is True
-        allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
-        if not allow:
+        if platform == "maoyan":
+            while True:
+                remaining = dl.remaining_seconds(time.monotonic())
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            r.log("wait-open: 到点（猫眼，无 prewarm）")
             prewarm_ok = False
-            r.log(f"wait-open: prewarm 文案护栏拦截（{note}）——T0 后走验证路径")
         else:
-            r.log(f"wait-open: prewarm 就绪（likely_active={prewarm_ok}，{note}）")
+            r.log(f"wait-open: 进入 lead 窗口（{args.countdown_lead_ms}ms），prewarm 取基线快照")
+        if platform != "maoyan":
+            root, rep = r.snap("s1_prewarm", pixel=True)
+            if not rep["cta"].get("container_present"):
+                r.log("STOP: prewarm 时 CTA 容器不可见——页面结构异常，不盲等")
+                return 1
+            prewarm_ok = rep["cta"].get("likely_active") is True
+            allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
+            if not allow:
+                prewarm_ok = False
+                r.log(f"wait-open: prewarm 文案护栏拦截（{note}）——T0 后走验证路径")
+            else:
+                r.log(f"wait-open: prewarm 就绪（likely_active={prewarm_ok}，{note}）")
         while True:
             remaining = dl.remaining_seconds(time.monotonic())
             if remaining <= 0:
@@ -598,6 +661,81 @@ def run(args, mode: str = "rush") -> int:
                 d.shell("input keyevent 4")
                 time.sleep(0.5)
             r.log(f"== 回流第 {reflow_round + 1} 轮：重新进入监听 ==")
+        # ---- 猫眼：同一套阶段，只换定位（文本→最近可点击祖先）----
+        if platform == "maoyan":
+            root_m, _ = r.snap("s1_maoyan")
+            info = MY.page_info(root_m)
+            if info["state"] == "order_confirm":
+                r.log("s1: 猫眼已在订单页——跳过 CTA/面板，直接核对")
+                cta = {"blocked_text": None, "safe_to_click": False, "text": "已在订单页"}
+                return _maoyan_order_step(d, r, root_m, info, args)
+            cta = info["cta"]
+            if not cta:
+                r.log("STOP: 猫眼未找到底部购票 CTA")
+                return 1
+            r.log(f"s1: 猫眼 CTA {cta['text']!r} 可点={cta['safe_to_click']} "
+                  f"阻断词={cta['blocked_text']}")
+            if not cta["safe_to_click"] and not getattr(args, "simulate", False):
+                r.log("STOP: CTA 处于预约/未开售态——默认不点；模拟演练加 --simulate")
+                return 1
+            r.tap(cta["bounds"], "猫眼购票 CTA")
+            r.mark("cta_tap")
+            # Phase 2：入口等待（猫眼面板比大麦慢，放宽到 3s；不做 dump 判定）
+            tiers = None
+            end_wait = time.monotonic() + 3.0
+            while time.monotonic() < end_wait:
+                root_m, _ = r.snap("s2_maoyan")
+                info = MY.page_info(root_m)
+                tiers = info["tiers"]
+                if tiers:
+                    break
+                time.sleep(0.1)
+            if not tiers:
+                r.log("STOP: 猫眼面板未出现票档（入口等待 3s 超时）")
+                return 1
+            r.mark("entry_sku_page")
+            r.log(f"s1: 进入猫眼面板（票档 {len(tiers)} 档）")
+            # Phase 3：选档（预选模式跳过，与大麦一致）
+            if not args.preselect:
+                price_want = str(cfg.get("price") or "")
+                target = next((t for t in tiers if t["price"] == price_want), None)
+                if target is None:
+                    idx = cfg.get("price_index")
+                    if isinstance(idx, int) and 0 <= idx < len(tiers):
+                        target = tiers[idx]
+                if target is None:
+                    r.log(f"STOP: 猫眼未匹配到目标票档（price={price_want}）")
+                    return 1
+                r.log(f"s2: 猫眼票价 {target['name']!r} ¥{target['price']} → 点击")
+                r.tap(target["bounds"], f"票档 ¥{target['price']}")
+            else:
+                r.log("s2: 预选模式——跳过选档（预约已带入目标档）")
+            r.mark("coords_ready")
+            # Phase 4：确定（开售后是购买按钮；预约态是底部「已预约」）
+            conf = MY.extract_confirm(root_m) or MY.bottom_button(root_m)
+            if conf is None:
+                r.log("STOP: 猫眼底部未找到确定/购买按钮")
+                return 1
+            r.tap(conf["bounds"], f"确定 {conf.get('hit') or conf.get('text')}")
+            r.mark("batch1_done")
+            time.sleep(1.2)
+            # Phase 5：结果判定（只读）
+            root_m, _ = r.snap("s5_maoyan")
+            blob = MY.page_info(root_m)["blob"]
+            if "日历提醒" in blob:
+                r.log("RESULT: ✅ 猫眼预约态终点——弹出日历提醒（开售时间见弹层）")
+                r.mark("done_no_confirm")
+                return 0
+            if not any(k in blob for k in MY.ORDER_MARKERS):
+                if cta["blocked_text"]:
+                    r.log(f"RESULT: ✅ 猫眼流程完成（预约态：CTA={cta['blocked_text']}，"
+                          f"无订单页，开售后才有提交步骤）")
+                    r.mark("done_no_confirm")
+                    return 0
+                r.log("STOP: 猫眼未进入订单页")
+                return 1
+            return _maoyan_order_step(d, r, root_m, MY.page_info(root_m), args)
+
         # ---- Phase 1+2：CTA 点击（prewarm T0 直点 > 缓存坐标 > 单 dump）+ 入口等待 ----
         entered_order = False
         entry = None

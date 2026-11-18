@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.dunpiao import probe  # noqa: E402
+from src.dunpiao import maoyan as MY  # noqa: E402
 from src.dunpiao import selectors as S  # noqa: E402
 
 FLOWLAYOUT = "cn.damai:id/project_detail_perform_price_flowlayout"
@@ -193,7 +194,41 @@ def main():
         Path(args.save_xml).write_text(xml, encoding="utf-8")
         print(f"XML 已存：{args.save_xml}", file=sys.stderr)
     root = ET.fromstring(xml)
-    r = extract(root, cur.get("activity", ""))
+    activity = cur.get("activity", "")
+    if cur.get("package") == MY.PACKAGE:
+        info = MY.page_info(root)
+        print(f"页面状态 : {info['state']}  （maoyan，activity={activity.rsplit('.', 1)[-1]}）")
+        for label, key in (("演出", "title"), ("场馆", "venue"),
+                           ("演出时间", "show_time"), ("价格区间", "price_range")):
+            if info.get(key):
+                print(f"{label:<8} : {info[key]}")
+        if info["cta"]:
+            c = info["cta"]
+            print(f"购票 CTA : {c['text']!r} 可点={c['safe_to_click']} "
+                  f"阻断词={c['blocked_text']} 中心={c['center']}")
+        if info["sessions"]:
+            print("场次     :")
+            for x in info["sessions"]:
+                print(f"  [{x['index']}] {x['date']!r} bounds={x['bounds']}")
+        if info["tiers"]:
+            print("票档     :")
+            for t in info["tiers"]:
+                print(f"  [{t['index']}] {t['status']:<12} {t['name']!r:<16} "
+                      f"¥{t['price']:<6} bounds={t['bounds']}")
+        if info["tier_line"]:
+            tl = info["tier_line"]
+            print(f"订单票档 : {tl['name']!r} 单价={tl['price']} 数量={tl['qty']}")
+        if info["amount"]:
+            print(f"订单金额 : {info['amount']}")
+        if info["submit"]:
+            print(f"提交按钮 : {info['submit']['hit']!r} @{info['submit']['center']}")
+        print()
+        print("```json")
+        print(json.dumps({k: v for k, v in info.items() if k != "blob"},
+                         ensure_ascii=False, indent=2))
+        print("```")
+        return 0
+    r = extract(root, activity)
     print(human(r))
     print("\n```json")
     print(json.dumps(r, ensure_ascii=False, indent=2))
