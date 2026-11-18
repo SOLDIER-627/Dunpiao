@@ -96,6 +96,45 @@
 - **单实例锁**：同一设备只允许一个运行器，第二个立即失败（避免互抢 UI）
 - **收银台即停**：付款永远人工
 
+## 参考代码仓
+
+本项目是**参考上游、不自造**的产物：方法骨架来自下列开源仓库，按本机真机实测改造。
+固定基线与取舍记录见 [原理与流程](docs/原理与流程.md) 第 7 节。
+
+### 主基线（代码级参考）
+
+| 仓库 | 采用内容 |
+|---|---|
+| **[currycan/HaTickets](https://github.com/currycan/HaTickets)** — 固定 commit `76946bf`（Mobile 端） | 本项目的方法主线：`fast_pipeline` 四阶段热路径、`page_probe` 状态分类与阻塞弹窗词表、`recovery` 瞬时错误配对恢复、`orchestrator.verify_order_result` 提交后只读验证、`runtime_lock` 单实例锁、`event_navigator.select_session` 场次匹配、`attendee_selector` 观演人位数、`price_selector` 票档不可购词表、`buy_button_guard` 文案护栏、`sale_waiter` 开售等待骨架 |
+
+代码内的对应关系逐条列在 [原理与流程 §7](docs/原理与流程.md)（`engine.py` ↔ `fast_pipeline.py`、`recovery.py` ↔ `page_probe.py + recovery.py` 等）。
+
+### 情报与设计参考（未直接采用代码）
+
+| 仓库 | 借鉴点 |
+|---|---|
+| [WECENG/ticket-purchase](https://github.com/WECENG/ticket-purchase) | Appium 侧大麦选择器实证（资源 ID / 文案），用于交叉验证选择器表 |
+| [Lzhimie/damai-ticket-helper](https://github.com/Lzhimie/damai-ticket-helper) | 大麦 9.x 适配经验、票价图片化与 `session_index` 概念来源 |
+| [Szymou/NNBS](https://github.com/Szymou/NNBS) | 回流监测设计要点（二次回流、「我知道了」弹窗自动点、场次过滤）与开售时间对齐 |
+| [yanzilee/damaiTickets](https://github.com/yanzilee/damaiTickets) | 移动端页面探测思路；其 Web/H5 路线受风控限制的反例 |
+| [MakiNaruto/Automatic_ticket_purchase](https://github.com/MakiNaruto/Automatic_ticket_purchase) | Web/Selenium 路线代表；仅登录态与余票监控价值，购票受限 |
+| [Guyungy/damaihelper](https://github.com/Guyungy/damaihelper) | Web 控制台工程骨架参考 |
+| [DracoYan-111/damai_grab_votes](https://github.com/DracoYan-111/damai_grab_votes) | 大麦「预选」机制情报 |
+| [Pactum7/ticket-grabbing](https://github.com/Pactum7/ticket-grabbing)、[TsungShr/ticket-sniper](https://github.com/TsungShr/ticket-sniper)、[xinyi-eng/damai-mcp](https://github.com/xinyi-eng/damai-mcp) | 提交闸门、拟人节奏等设计互证 |
+
+### 工具与协议
+
+| 项目 | 用途 |
+|---|---|
+| [openatx/uiautomator2](https://github.com/openatx/uiautomator2) | 真机 UI 自动化直连（本项目的执行层） |
+| [appium/appium-uiautomator2-driver](https://github.com/appium/appium-uiautomator2-driver) | 底层同为 UiAutomator2 的旁证（我们省掉 Appium 中间层） |
+| [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) | 真机镜像/调试辅助（非运行依赖） |
+
+### 明确不采用
+
+- **Frida/Xposed 注入、签名逆向、接口直调（mtop/baxia）、验证码代解、代理池、批量注册**——违反合规红线，且社区实证大麦检测后静默限流
+- **Web/Selenium 与 H5 路线**——风控强、稳定性差，仅保留余票监控价值
+
 ## 常见 STOP 与处置
 
 | STOP 信息 | 原因 | 处置 |
@@ -116,6 +155,7 @@ docs/抢票模式.md          抢票：开售倒计时、预选、命令速查
 docs/回流模式.md          回流：监听机制、两级面板、刷新节奏
 docs/原理与流程.md        机制细节、设计纪律、耗时模型、上游对应
 docs/AI助手配置.md        Skill 使用指南 + 示例提示词
+（本文末「参考代码仓」列出全部上游来源）
 scripts/rush.py          抢票入口
 scripts/reflow.py        回流入口
 scripts/show_info.py     页面信息提取（只读）
