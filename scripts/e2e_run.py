@@ -12,11 +12,13 @@
                    实名观演人/立即提交（0.02s 粒度）；失败回退元素点击（0.55s 轮询）
   Phase 5 订单页   观演人 checkbox 补选（上游 _finish_confirm；只点未勾选的，
                    元素点击后验 checked，失效则 shell 兜底）→ 全字段核对 →
-                   （--submit 时）审计记录 → 点击提交 → 收银台即停
+                   （--submit 时）审计记录 → 点击提交 → 只读结果验证 → 收银台即停
 
 保留的本仓库设施（上游方法之外的审计/合规层，不参与点击决策）：
   - 提交审计：--submit 真实提交、submit_record.json（仅审计不拦截，订单
-    是否已处理由用户人工确认，App 自身有待支付拦截）、收银台即停
+    是否已处理由用户人工确认，App 自身有待支付拦截）、收银台即停；
+  - 提交后只读验证（上游 verify_order_result 同构）：不再发出任何点击，
+    sold_out/验证码/未支付/支付页信号/结果未知五分类，超时交人工核实
   - --wait-open：clock_sync 开售等待 + prewarm（上游 sale_waiter 骨架，E2E-07 成果）
   - 坐标缓存（E2E-13）：logs/coords_cache.json 跨次复用 CTA/票价/确定按钮坐标；
     --capture-coords 预约态预填；缓存只存坐标不存决策，点错自愈=重测一次
@@ -781,48 +783,68 @@ def main() -> int:
     r.tap(order["submit_button"]["bounds"], "立即提交")
     r.mark("submit_tap")
 
-    # ---- 5) 收银台即停（上游同款思路：轻量轮询 activity，命中才 dump 取证）----
-    # 实测（2026-11-18 sandy 开售）：提交点击后大麦可能停在 DmOrderActivity
-    # 「提交中」超过 8s，之后才跳收银台；放宽到 20s，期间若出现
-    # 「订单已提交/提交中」文本视为仍在推进继续等
+    # ---- 5) 提交后结果验证（上游 verify_order_result 同构：只读
+    # fail-closed——提交点击后不再发出任何点击，防重复下单）。
+    # 实测（2026-11-18 sandy 开售）：提交后大麦可能停在 DmOrderActivity
+    # 「提交中」超过 8s，之后才跳收银台；观察窗口放宽到 20s（上游默认 5s）
     deadline = time.monotonic() + 20.0
     act = ""
-    # 瞬时错误弹窗（上游机制移植，src/dunpiao/recovery.py）：~1s 一次 dump
-    # 分类——瞬时标记+本地配对重试控件才点（fail-closed）；验证/待支付弹窗
-    # 即停；相同布局指纹只处理一次。15:00 sandy 实战「收银台未现」的真实
-    # 原因就是「抢票人数太多，请继续尝试」弹窗挂屏。
-    acted_fps: set = set()
-    last_popup_check = 0.0
+    # 上游 verify_order_result 词表（逐字移植）
+    payment_text_markers = ("立即支付", "去支付", "确认支付", "支付剩余时间", "收银台")
+    payment_activities = ("payactivity", "cashier", "alipayclient", "paymentactivity")
+    sold_out_markers = ("已售罄", "库存不足", "暂时无票")
+    captcha_markers = ("滑块", "人机验证", "安全验证", "验证码")
+    last_dump = 0.0
     while time.monotonic() < deadline:
         act = d.app_current().get("activity", "")
-        if "MspContainerActivity" in act:
-            root5, rep5 = r.snap("s5_cashier")
-            texts = {
-                (n.get("text") or "").strip()
-                for n in root5.iter("node")
-            }
-            if any("滑块" in t or "安全验证" in t for t in texts):
+        act_key = act.casefold()
+        now = time.monotonic()
+        # 只读观察：~0.5s 一次 dump 取全页文本，分类但不点击（上游 0.3s 粒度）
+        merged = ""
+        if now - last_dump >= 0.5:
+            last_dump = now
+            try:
+                root5 = ET.fromstring(d.dump_hierarchy())
+                merged = " ".join(
+                    (n.get("text") or "").strip()
+                    for n in root5.iter("node")
+                    if n.get("visible-to-user") != "false"
+                    and (n.get("text") or "").strip()
+                )
+            except Exception:
+                root5, merged = None, ""
+        if any(m in act_key for m in payment_activities):
+            if root5 is not None and any("滑块" in t or "安全验证" in t for t in merged.split()):
                 r.log("STOP: 收银台出现验证拦截——红线，交人工")
                 return 1
             records[-1]["status"] = "awaiting_user_payment"
             gate.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
             r.mark("cashier")
-            r.log(f"RESULT: ✅ 提交成功到达收银台——待用户支付，流程终止")
+            r.log("RESULT: ✅ 提交成功到达收银台——待用户支付，流程终止")
             return 0
-        now = time.monotonic()
-        if now - last_popup_check >= 1.0:
-            last_popup_check = now
-            rec = recovery.recover_transient_failure(
-                d, r.log, max_attempts=1, acted_fingerprints=acted_fps,
-            )
-            if rec["state"] == "manual_verification":
-                r.log("STOP: 提交后出现验证拦截——红线，交人工")
+        if merged:
+            if any(m in merged for m in sold_out_markers):
+                r.log("STOP: 提交后页面显示票已售罄（上游 sold_out）——停止，交人工")
                 return 1
-            if rec["state"] == "pending_order_dialog":
-                r.log("STOP: 提交后出现待支付订单弹窗——交人工（先查大麦待付款）")
+            if any(m in merged for m in captcha_markers):
+                r.log("STOP: 提交后触发验证码/人机验证（上游 captcha）——红线，交人工")
                 return 1
+            if "未支付" in merged:
+                r.log("STOP: 检测到未支付订单但无法归属本次提交（上游 preexisting_order）"
+                      "——停止自动操作，请人工核实订单列表")
+                return 1
+            if any(m in merged for m in payment_text_markers):
+                records[-1]["status"] = "awaiting_user_payment"
+                gate.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+                r.mark("cashier")
+                r.log("RESULT: ✅ 检测到支付页信号——待用户支付，流程终止")
+                return 0
         time.sleep(POLL_PAGE)
-    r.log(f"STOP: 提交后未检测到收银台（activity={act.split('.')[-1]}）——不盲重试，交人工")
+    # 上游同款 fail-closed：结果未知，绝不二次点击
+    records[-1]["status"] = "result_unknown"
+    gate.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+    r.log(f"STOP: 订单验证超时（activity={act.split('.')[-1]}，上游 timeout）——"
+          "结果未知，不二次点击；请在大麦「我的→待付款/订单列表」人工核实")
     return 1
 
 

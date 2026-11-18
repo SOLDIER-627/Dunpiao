@@ -15,10 +15,14 @@
   3. 点击用 shell input tap，结果未知时不做任何兜底点击（防重复点击）；
   4. 相同布局指纹的错误只处理一次（duplicate fingerprint 停手）。
 
-本机观察补充（区别于上游）：2026-11-18 林忆莲场实战观察到「抢票人数太多，
-请继续尝试」弹窗，按钮文案为「继续尝试」——不含上游词表里的「重试」二字，
-故在本仓库词表追加 EXT_RETRY_ACTION_TEXTS（继续尝试/重新尝试/再试一次），
-上游原词表保持不动。
+上游最核心纪律（第 5 条）：本机制只适用于提交边界之前。提交点击之后
+上游 verify_order_result 是只读 fail-closed——不再发出任何点击，结果
+无法归属一律「结果未知」交人工核实订单列表（防重复下单）。
+
+本机观察弹窗「抢票人数太多，请继续尝试」按上游纪律的处理：上游词表
+不含人数类标记与「继续尝试」文案，不归类为瞬时错误（不扩词表，完全
+遵照上游）。提交后出现（实测场景）→ 只读分类「结果未知」交人工点
+「继续尝试」；提交前出现 → 不属任何阻塞类，与上游一致交人工处理。
 
 纯 stdlib（xml.etree + hashlib），单设备 uiautomator2 直连。
 """
@@ -44,16 +48,6 @@ RETRY_ACTION_PHRASES = (
     "请重试",
     "重试一下",
 )
-# 本机观察补充：继续尝试/重新尝试/再试一次（见模块 docstring）
-EXT_RETRY_ACTION_TEXTS = frozenset(
-    {"继续尝试", "重新尝试", "再试一次"}
-)
-# 本机观察补充：「抢票人数太多，请继续尝试」弹窗——上游错误词表只有
-# 网络/加载类，不含人数类；追加后才能走同一套配对机制
-EXT_TRANSIENT_ERROR_MARKERS = (
-    "人数太多",
-    "人数过多",
-)
 LOCAL_ERROR_CONTAINER_TOKENS = (
     "dialog",
     "empty",
@@ -78,8 +72,6 @@ TRANSIENT_ERROR_MARKERS = (
     "暂无网络",
     "无网络连接",
 )
-# 全量错误标记 = 上游原词表 + 本机观察补充（人数太多/过多）
-TRANSIENT_ERROR_MARKERS_ALL = TRANSIENT_ERROR_MARKERS + EXT_TRANSIENT_ERROR_MARKERS
 # 共享拦截弹窗标记（上游注释：保持短语具体，泛化词会误停 rush 路径）
 MANUAL_VERIFICATION_MARKERS = (
     "验证码",
@@ -148,11 +140,7 @@ def _nearest_retry_click_target(
         return parent
     # 大麦部分重试文案自身可点，即使 uiautomator 未暴露 clickable=true。
     # 只对精确动作文案（或显式「点击重试」指令）保留该回退（上游原版）。
-    if (
-        node_text in RETRY_ACTION_TEXTS
-        or node_text in EXT_RETRY_ACTION_TEXTS
-        or "点击重试" in node_text
-    ):
+    if node_text in RETRY_ACTION_TEXTS or "点击重试" in node_text:
         return node
     return None
 
@@ -160,7 +148,7 @@ def _nearest_retry_click_target(
 def _is_reasonable_error_container(node: ET.Element) -> bool:
     """嵌套节点是否具备本地错误容器语义（上游原版）。"""
     own_text = _node_visible_text(node)
-    if any(marker in own_text for marker in TRANSIENT_ERROR_MARKERS_ALL):
+    if any(marker in own_text for marker in TRANSIENT_ERROR_MARKERS):
         return True
     identity = " ".join(
         (
@@ -245,7 +233,7 @@ def find_local_transient_retry_coords(
         for node in visible_nodes
         if any(
             marker in _node_visible_text(node)
-            for marker in TRANSIENT_ERROR_MARKERS_ALL
+            for marker in TRANSIENT_ERROR_MARKERS
         )
     ]
     if not marker_nodes:
@@ -254,10 +242,7 @@ def find_local_transient_retry_coords(
         node_text = _node_visible_text(action_node)
         if not node_text:
             continue
-        exact_action = (
-            node_text in RETRY_ACTION_TEXTS
-            or node_text in EXT_RETRY_ACTION_TEXTS
-        )
+        exact_action = node_text in RETRY_ACTION_TEXTS
         phrase_action = any(p in node_text for p in RETRY_ACTION_PHRASES)
         if not (exact_action or phrase_action):
             continue
@@ -311,7 +296,7 @@ def inspect_transient_failure(root, package: str, activity: str) -> dict:
             merged_texts.append(text)
     merged = " ".join(merged_texts)
     error_markers = tuple(
-        sorted(m for m in TRANSIENT_ERROR_MARKERS_ALL if m in merged)
+        sorted(m for m in TRANSIENT_ERROR_MARKERS if m in merged)
     )
     structural_nodes = tuple(
         (
