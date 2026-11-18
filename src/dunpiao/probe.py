@@ -80,9 +80,10 @@ def _parse_bounds(s: str | None) -> list[int] | None:
 
 
 def _looks_like_button(mean_rgb: tuple[float, float, float]) -> bool:
-    """大麦购票按钮主色为橙红（本机实测均值 ≈ (235,116,59)）。粗判定，仅作辅助证据。"""
+    """大麦购票按钮主色为橙红系：可购态 ≈ (235,116,59)，置灰/缺货态 ≈ (241,176,132)。
+    粗判定，仅作辅助证据。"""
     r, g, b = mean_rgb
-    return r > 170 and 60 < g < 170 and b < 120 and (r - b) > 80
+    return r > 170 and b < 160 and (r - b) > 70
 
 
 def pixel_check_cta(screenshot, bounds: list[int] | None) -> dict | None:
@@ -108,7 +109,7 @@ def pixel_check_cta(screenshot, bounds: list[int] | None) -> dict | None:
     }
 
 
-def analyze(root: ET.Element, package: str) -> dict:
+def analyze(root: ET.Element, package: str, activity: str | None = None) -> dict:
     """从 UI 层级 XML 判定页面状态。纯函数，无副作用。"""
     report: dict = {
         "state": "unknown",
@@ -139,6 +140,43 @@ def analyze(root: ET.Element, package: str) -> dict:
     if login := _text_marker_present(root, S.LOGIN_PROMPT_MARKERS):
         report["login_prompt"] = login
         report["state"] = "login_blocked"
+        return report
+
+    # SKU 页识别：活动名或票档容器结构（场次选择器缺失的售罄态也能识别）
+    is_sku = bool(activity and "sku" in activity.lower()) or bool(
+        _find_by_ids(root, S.PRICE_PANEL_CONTAINER_IDS)
+    )
+    if is_sku:
+        report["state"] = "sku_page"
+        # 票档条目：容器内 clickable 无名 FrameLayout（价格文本本版本完全不在无障碍树）
+        tiers = []
+        sold_out_tags = 0
+        for n in root.iter("node"):
+            if (n.get("resource-id") or "").endswith("project_detail_perform_price_flowlayout"):
+                for child in n:
+                    if child.get("clickable") == "true":
+                        tiers.append(child.get("bounds"))
+                for t in n.iter("node"):
+                    txt = _text(t)
+                    if txt and txt in S.PRICE_SOLD_OUT_TEXTS:
+                        sold_out_tags += 1
+                break
+        report["sku"] = {
+            "tier_count": len(tiers),
+            "tier_bounds": tiers,
+            "sold_out_tags": sold_out_tags,
+            "all_sold_out": len(tiers) > 0 and sold_out_tags >= len(tiers),
+        }
+        if report["sku"]["all_sold_out"]:
+            report["state"] = "sku_page_sold_out"
+            report["sold_out_marker"] = "缺货登记"
+        # SKU 确定按钮：同详情 CTA，无障碍不可见，bounds 锚定 + 像素验证
+        for n in _find_by_ids(root, S.CTA_BUTTON_IDS):
+            report["cta"]["container_present"] = True
+            report["cta"]["container_empty"] = not _text(n) and not _desc(n) and len(list(n)) == 0
+            report["cta"]["container_bounds"] = _parse_bounds(n.get("bounds"))
+            report["cta"]["anchor"] = "btn_buy_view"
+            break
         return report
 
     # 详情页判定：标题 ID 命中
@@ -234,26 +272,29 @@ def run(serial: str | None = None, save_xml: str | None = None) -> dict:
     import uiautomator2 as u2
 
     d = u2.connect(serial) if serial else u2.connect()
-    package = d.app_current().get("package", "")
+    cur = d.app_current()
+    package = cur.get("package", "")
+    activity = cur.get("activity", "")
     xml = d.dump_hierarchy()
     if save_xml:
         Path(save_xml).write_text(xml, encoding="utf-8")
     root = ET.fromstring(xml)
-    report = analyze(root, package)
-    # 像素验证：容器在但无障碍树看不到按钮时，截图判定按钮是否视觉存在
-    cta = report["cta"]
-    if cta["container_present"] and not cta["button_ready"] and cta.get("container_bounds"):
-        try:
-            shot = d.screenshot()
-            cta.update(pixel_check_cta(shot, cta["container_bounds"]) or {})
-        except Exception as e:  # 像素验证失败不影响探针主流程
-            report["warnings"].append(f"像素验证失败：{type(e).__name__}")
+    report = analyze(root, package, activity)
     report["meta"] = {
         "probe": "dunpiao-probe-v1",
         "time": datetime.datetime.now().isoformat(timespec="seconds"),
         "xml_bytes": len(xml),
         "read_only": True,
+        "activity": activity,
     }
+    # 像素验证：锚点在但无障碍树看不到按钮时，截图判定按钮是否视觉存在
+    cta = report["cta"]
+    if cta["container_present"] and cta.get("container_bounds"):
+        try:
+            shot = d.screenshot()
+            cta.update(pixel_check_cta(shot, cta["container_bounds"]) or {})
+        except Exception as e:  # 像素验证失败不影响探针主流程
+            report["warnings"].append(f"像素验证失败：{type(e).__name__}")
     return report
 
 

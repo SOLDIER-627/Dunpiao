@@ -71,3 +71,19 @@
 | 预选横幅 | 未检测 | 检出"预选本次实名抢票观演人，抢票快人一步！" |
 
 改版探针已升级：`container_bounds` 记录、`pixel_check_cta()` 容器区域均值色启发式（橙红判定）、警告文案修正。日志：`logs/probe_upstream_onsale2_2026-11-18.log`、`logs/probe_v2_onsale2_2026-11-18.json`；样本：`pagesamples/onsale2_2026-11-18.xml`。
+
+## SKU 页（售罄态）对照（2026-11-18 10:08-10:09，李大奔 BENZO 场）
+
+样本：`pagesamples/sku_100836.xml` + `sku_screen_*.png`（活动 `NcovSkuActivity`）。该场开票后全部票档进入缺货登记，恰好提供**售罄态 SKU 完整样本**（回流票监控 P4 的目标状态实证）。
+
+### 关键发现
+
+1. **票价文本彻底不在无障碍树**：票档容器内只有 4 个 `tv_tag='缺货登记'`，价格连空 TextView 都没有——比 WECENG"text 为空串"的结论更彻底，价格是纯动态模板渲染。"容器 + 索引 + 像素/OCR"成为唯一路径（三阶梯收敛为单路径）。
+2. **票档条目结构**：容器 `project_detail_perform_price_flowlayout` 内 5 个 clickable 无名 FrameLayout，bounds 完整可得 → **索引定位 + 坐标点击可行**（本机 5 档、bounds 无重叠）。
+3. **btn_buy_view 同样无障碍不可见**：有节点、无 text/desc、无子节点、clickable=false；像素实证视觉存在——**置灰态 ≈ RGB(241,176,132)**，可购态 ≈ (235,116,59)。像素启发式已放宽覆盖置灰态，且两态色差可判按钮可用性（后续做可购/置灰二分类）。
+4. **观演人/数量区域未渲染**（售罄态无该区域）——有票态样本待真实可购场次补充；`layout_num`/`img_jia`/观演人选择器沿用上游/WECENG，待验证。
+5. **上游盲区实证**：上游正确识别 sku_page 但因目标校验依赖详情页标题（SKU 页头标题 ID 不同）拒绝继续；改版探针作为纯状态分类器成功分类 `sku_page`（升级：活动名感知 + 票档结构识别 + 售罄态判定 + 置灰像素启发式）。
+
+### 状态分类器 v1 现状
+
+`detail_page` / `detail_page`（CTA 两级就绪 + 像素验证）/ `sku_page` / `sku_page_sold_out` / `login_blocked` / `order_confirm_page`（文本粗判）/ `unknown_or_other`。对照记录：`logs/probe_upstream_sku_2026-11-18.log`、`logs/probe_v2_sku_2026-11-18.json`。
