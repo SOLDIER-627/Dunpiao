@@ -71,6 +71,43 @@ def _ids_with_text(root: ET.Element, ids) -> dict[str, str]:
     return {i: _text(n) for n in _find_by_ids(root, ids) if (i := _rid(n).split("/")[-1]) and _text(n)}
 
 
+def _parse_bounds(s: str | None) -> list[int] | None:
+    """'[x1,y1][x2,y2]' -> [x1,y1,x2,y2]。"""
+    if not s:
+        return None
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", s)
+    return [int(g) for g in m.groups()] if m else None
+
+
+def _looks_like_button(mean_rgb: tuple[float, float, float]) -> bool:
+    """大麦购票按钮主色为橙红（本机实测均值 ≈ (235,116,59)）。粗判定，仅作辅助证据。"""
+    r, g, b = mean_rgb
+    return r > 170 and 60 < g < 170 and b < 120 and (r - b) > 80
+
+
+def pixel_check_cta(screenshot, bounds: list[int] | None) -> dict | None:
+    """对容器区域做像素验证：无障碍树不可见时判断按钮是否视觉存在。
+
+    背景：本机实测大麦 9.0.38.6 购票 CTA 渲染在 BricksChannelPageActivity
+    动态模板层，dump_hierarchy 与 u2 选择器均不可见，但按钮实际显示在容器
+    bounds 内（橙色）。坐标点击仍可命中——与上游容器锚定做法兼容。
+    """
+    if not bounds:
+        return None
+    x1, y1, x2, y2 = bounds
+    crop = screenshot.crop((x1, y1, x2, y2))
+    px = list(crop.convert("RGB").getdata())
+    if not px:
+        return None
+    n = len(px)
+    mean = (sum(p[0] for p in px) / n, sum(p[1] for p in px) / n, sum(p[2] for p in px) / n)
+    return {
+        "button_visually_rendered": _looks_like_button(mean),
+        "mean_rgb": [round(v) for v in mean],
+        "method": "container-region mean-color heuristic",
+    }
+
+
 def analyze(root: ET.Element, package: str) -> dict:
     """从 UI 层级 XML 判定页面状态。纯函数，无副作用。"""
     report: dict = {
@@ -83,9 +120,11 @@ def analyze(root: ET.Element, package: str) -> dict:
         "cta": {
             "container_present": False,
             "container_empty": None,      # 容器存在但无子节点 = True
+            "container_bounds": None,     # 容器屏幕坐标 [x1,y1,x2,y2]
             "button_ready": False,        # 按钮级就绪（id 或 词表命中）
             "button_text": None,
             "button_via_desc": False,
+            "button_visually_rendered": None,  # 像素验证：无障碍树不可见但视觉存在
             "blocked_text": None,         # 售罄/未开售等阻断词
         },
         "preset_banner": {"present": False, "text": None},   # 预选入口
@@ -140,6 +179,7 @@ def analyze(root: ET.Element, package: str) -> dict:
     if containers:
         report["cta"]["container_present"] = True
         report["cta"]["container_empty"] = len(list(containers[0])) == 0
+        report["cta"]["container_bounds"] = _parse_bounds(containers[0].get("bounds"))
 
     button = None
     for n in _find_by_ids(root, S.CTA_BUTTON_IDS):
@@ -178,8 +218,9 @@ def analyze(root: ET.Element, package: str) -> dict:
     # 状态细分与警告
     if report["cta"]["container_empty"] and not report["cta"]["button_ready"]:
         report["warnings"].append(
-            "CTA 容器存在但为空：购票栏未渲染（预约未开票或页面未加载完）；"
-            "上游原版在此场景判 ready=true（容器级），本探针判未就绪"
+            "CTA 容器在无障碍树中为空：购票按钮可能渲染在动态模板层（Bricks），"
+            "dump/选择器不可见；已用像素验证判定视觉存在性（button_visually_rendered）。"
+            "坐标锚定点击仍有效（上游做法）；避免依赖无障碍树找购票按钮"
         )
     if report["preset_banner"]["present"]:
         report["warnings"].append(
@@ -199,6 +240,14 @@ def run(serial: str | None = None, save_xml: str | None = None) -> dict:
         Path(save_xml).write_text(xml, encoding="utf-8")
     root = ET.fromstring(xml)
     report = analyze(root, package)
+    # 像素验证：容器在但无障碍树看不到按钮时，截图判定按钮是否视觉存在
+    cta = report["cta"]
+    if cta["container_present"] and not cta["button_ready"] and cta.get("container_bounds"):
+        try:
+            shot = d.screenshot()
+            cta.update(pixel_check_cta(shot, cta["container_bounds"]) or {})
+        except Exception as e:  # 像素验证失败不影响探针主流程
+            report["warnings"].append(f"像素验证失败：{type(e).__name__}")
     report["meta"] = {
         "probe": "dunpiao-probe-v1",
         "time": datetime.datetime.now().isoformat(timespec="seconds"),

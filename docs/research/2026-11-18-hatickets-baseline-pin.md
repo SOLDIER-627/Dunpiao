@@ -48,3 +48,26 @@
 - CTA 词表分三组：READY（立即购买/预订/抢购/选座购买）、RESERVE（立即预约等）、BLOCKED（已售罄/即将开抢/暂未开售）
 - 运行：`.venv/bin/python -m src.dunpiao.probe [--serial] [--json] [--save-xml]`；退出码 detail_page=0
 - 台账记录：离线样本判定与真机实测结果完全一致（logs/probe_v2_2026-11-18.json）
+
+## 开票中页面对照（2026-11-18 10:05-10:07，李大奔 BENZO 场）
+
+### 本轮最重要的技术发现：CTA 无障碍不可见
+
+开票中的详情页实测——购票按钮**视觉上已渲染**（容器区域像素均值 RGB(235,116,59)，即大麦橙按钮色），但：
+
+- `dump_hierarchy` 抓不到（容器节点 0 子节点）
+- u2 选择器跨窗口查询也查不到（textMatches/descriptionMatches/resourceId 全部 count=0）
+- 原因（dumpsys window 实证）：购票栏渲染在 `BricksChannelPageActivity` 动态模板窗口（Window #11），与详情主窗口（ProjectDetailActivity，Window #10）分离，无障碍树不暴露其节点
+
+**推论（进 DM-04 设计基线）**：大麦购票核心 UI 疑似故意不暴露无障碍节点（反自动化）。生态三阶梯中"资源 ID/文本匹配"对**详情页 CTA** 在本版本基本失效；唯一可行路径 = **容器 bounds 坐标锚定点击**（上游做法，容器位置稳定）+ 像素/OCR 验证辅助。票档页（SKU）按钮是否同样不可见，待真实 SKU 样本验证。
+
+### 对照结果（配置修正后）
+
+| 维度 | 上游原版 | 改版探针 v1（+像素验证） |
+|---|---|---|
+| 目标校验 | **不匹配即拒绝**（荔枝场配置未改时正确拒绝探测李大奔页）✅ 安全行为 | 无目标校验（只报状态，防抢错场逻辑在流程层实现） |
+| 页面/就绪 | detail_page，ready=true，0.60s，exit=0 | detail_page + 全量结构化信息（标题/场次 11.28 19:00/价格 ¥380-980） |
+| CTA | 容器级就绪 | 容器 empty + **button_visually_rendered=true**（像素判定） |
+| 预选横幅 | 未检测 | 检出"预选本次实名抢票观演人，抢票快人一步！" |
+
+改版探针已升级：`container_bounds` 记录、`pixel_check_cta()` 容器区域均值色启发式（橙红判定）、警告文案修正。日志：`logs/probe_upstream_onsale2_2026-11-18.log`、`logs/probe_v2_onsale2_2026-11-18.json`；样本：`pagesamples/onsale2_2026-11-18.xml`。
