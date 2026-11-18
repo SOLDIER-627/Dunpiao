@@ -28,3 +28,4 @@
 > **2026-11-18 更新**：PH-04 状态分类器 v1.1 闭环——开票页/SKU 页（售罄+在售混合态）/订单确认页全部实证采样并分类；提交按钮在订单页完全可见（立即提交/可点击），提交前核对三要素（观演人/张数/总价）可机读。台账见 `docs/research/HaTickets基线固定_2026-11-18.md`。
 
 | E2E-07 | 待开始 | 移植上游 HaTickets 已验证机制进 runner（clock_sync 对时/开售等待、buy_button_guard、recovery_strategies），配置兼容上游 schema（probe_only/if_commit_order/countdown_lead_ms） | 移植项逐个有本机实测对照；不重写上游已验证逻辑；点击层保留 shell input（HyperOS 实测约束） |
+| E2E-08 | 待 E2E-07 | 热路径提速：固定 sleep 改短间隔轮询（0.1-0.2s）、每次状态检查只截一次图、非决策点跳过像素验证 | 本机实测 CTA点击→收银台 ≤5s（当前 8.6s 基线见 logs/e2e_20261118_105032/）；各阶段有前后耗时对照；提速不放松任何闸门 |
