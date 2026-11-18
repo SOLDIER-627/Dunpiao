@@ -739,6 +739,13 @@ def main() -> int:
     pre = recovery.inspect_transient_failure(
         root, "cn.damai", d.app_current().get("activity", "")
     )
+    # 授权弹窗（上游 probe_consent_dialog 同构：资源 ID 直查，非文本）
+    if any(
+        (n.get("resource-id") or "") == "cn.damai:id/id_boot_action_agree"
+        for n in root.iter("node")
+    ):
+        r.log("STOP: 提交前检测到授权弹窗（上游 consent_dialog）——不点击提交，交人工")
+        return 1
     if pre["manual_verification"]:
         r.log("STOP: 提交前检测到验证码/人机验证——不点击提交，交人工")
         return 1
