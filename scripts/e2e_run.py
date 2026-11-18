@@ -86,11 +86,33 @@ def main() -> int:
         action="store_true",
         help="同演出已有提交记录时覆盖一次（需人工确认历史订单已取消/未付款）",
     )
+    ap.add_argument(
+        "--clear-record",
+        action="store_true",
+        help="人工已取消/处理完订单后闭环记录（标记 cancelled_by_user，闸门重新放行）",
+    )
     args = ap.parse_args()
 
     import uiautomator2 as u2
-    d = u2.connect(args.serial)
     out = ROOT / "logs" / f"e2e_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # ---- 记录闭环：人工取消/处理完后，把闸门记录标记为已处理 ----
+    if args.clear_record:
+        gate = ROOT / "logs" / "submit_record.json"
+        recs = json.loads(gate.read_text(encoding="utf-8")) if gate.exists() else []
+        n = 0
+        for x in recs:
+            if x.get("show_tag") == args.show_tag and x.get("status") not in (
+                "cancelled_by_user",
+            ):
+                x["status"] = "cancelled_by_user"
+                x["resolved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+                n += 1
+        gate.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"已把 {args.show_tag} 的 {n} 条提交记录标记为 cancelled_by_user，闸门重新放行")
+        return 0
+
+    d = u2.connect(args.serial)
     r = Runner(d, out, args.expected_total, args.max_state_wait)
     r.log(f"=== E2E 运行开始（submit={'ON' if args.submit else 'OFF'}，expected_total={args.expected_total}）===")
 
@@ -224,7 +246,8 @@ def main() -> int:
     prior = [x for x in records if x.get("show_tag") == args.show_tag]
     if prior and not args.force_override_once:
         r.log(f"STOP: 演出 {args.show_tag} 已有提交记录（{prior[-1]['time']}，status={prior[-1].get('status')}）；"
-              "确认历史订单已取消/未付款后可用 --force-override-once 覆盖一次")
+              f"若订单已取消/处理完，先运行: .venv/bin/python scripts/e2e_run.py --clear-record；"
+              "或本次覆盖用 --force-override-once")
         return 1
     records = [x for x in records if x.get("show_tag") != args.show_tag]
     records.append({
