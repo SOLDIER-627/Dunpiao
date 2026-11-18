@@ -113,5 +113,4 @@
 ## 文档索引
 
 - **原理与流程**：[docs/原理与流程.md](docs/原理与流程.md)（机制、设计纪律、耗时模型、上游对应）
-- 任务台账：[TASKS.md](TASKS.md)（E2E-01~22 逐次实验记录）
 - 新演出向导 skill：`.agents/skills/new-show-setup/SKILL.md`
