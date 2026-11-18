@@ -39,6 +39,7 @@
 | E2E-17 | 完成 | 预选直点默认化（三击流程）+ README 使用说明重写 | 2026-11-18 完成（用户决策：前置准备默认预约预选，全程只需 3 次点击 CTA→确定→立即提交，付款人工）：①--preselect 默认开启，新增 --no-preselect 关闭（未预约预选的演出）；②README.md 重写：环境准备/配置/标准三击流程/命令速查/耗时基准/安全机制/常见 STOP 处置/文档索引；③发现并记录隐患：rsync 会把工作区 README 覆盖 Dunpiao/README.md（此前对 Dunpiao 侧 README 的修改曾被静默回滚）——README 一律改工作区源文件 |
 | E2E-18 | 完成 | 提交后瞬时弹窗自动重试（抢票人数太多类） | 2026-11-18 完成（用户报告 15:00 实战「收银台未现」疑似为该弹窗挂屏）：上游无「抢票人数太多」原文但有同类机制（TRANSIENT_ERROR_MARKERS + _RETRY_ACTION_TEXTS + _recover_transient_page_failure 自动点重试）；s5 收银台等待循环内 ~0.7s 一次 u2 轻查询（非 dump），命中「继续尝试/重新尝试/再试一次/点击重试」按钮即 shell 点击恢复（上限 5 次），验证类弹窗仍即停交人工 |
 | E2E-19 | 完成 | 瞬时错误恢复改为上游机制完整移植 | 2026-11-18 完成（用户要求用上游 page_probe.py/recovery.py 机制）：新建 src/dunpiao/recovery.py——逐字移植 TRANSIENT_ERROR_MARKERS/_RETRY_ACTION_TEXTS/_RETRY_ACTION_PHRASES/_nearest_retry_click_target/_is_local_transient_retry_pair（最近公共祖先≤1边+错误容器语义）/find_local_transient_retry_coords/inspect_transient_failure（含布局指纹）/recover_transient_failure（shell tap+指纹去重+settle 复查）；关键发现：上游词表识别不了「抢票人数太多」（错误标记只有网络/加载类、按钮文案「继续尝试」不含「重试」）→按模块设计追加本机观察补充 EXT_TRANSIENT_ERROR_MARKERS（人数太多/过多）与 EXT_RETRY_ACTION_TEXTS（继续尝试/重新尝试/再试一次），上游原词表不动；s5 改为 ~1s 一次 dump 分类（替换上一版 u2 选择器快查）；单测 6/6（人数弹窗配对/fail-closed/拒绝宽泛配对/验证分类/待支付分类/上游原词回归）|
+| E2E-20 | 完成 | 瞬时恢复机制触发点收敛 + 提交前 overlay 筛查 | 2026-11-18 完成（用户确认触发边界）：机制只在提交环节触发——s5 提交后等待（已有）+ 新增提交前筛查（上游 _submit_order_fast 同构，复用核对 dump 零耗时）：验证/待支付弹窗即停不提交（不写 submitted_intent 审计记录）；瞬时错误先恢复→重取快照→order_fields_ready 复验→再提交；中间阶段（选档/连点）不触发（有自愈链）。上游 3 触点（选档流程/通用探测/提交前）中，我们的 hot path 中间阶段由自愈链覆盖，只补齐提交前后两个点 |
 
 ## 下一轮热路径任务（GPT 复核）
 

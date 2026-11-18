@@ -731,6 +731,32 @@ def main() -> int:
         r.log("RESULT: ✅ 端到端（无提交）通过——已到订单页且全字段核对一致，停在提交前")
         return 0
 
+    # ---- 3.5) 提交前 overlay 筛查（上游 _submit_order_fast 同构；复用核对
+    # dump 零额外耗时）：验证/待支付弹窗即停不提交；瞬时错误先恢复再提交。
+    # 防的是「弹窗已在屏上时盲点提交」（点击会落在弹窗层而非提交按钮）----
+    pre = recovery.inspect_transient_failure(
+        root, "cn.damai", d.app_current().get("activity", "")
+    )
+    if pre["manual_verification"]:
+        r.log("STOP: 提交前检测到验证码/人机验证——不点击提交，交人工")
+        return 1
+    if pre["pending_order"]:
+        r.log("STOP: 提交前检测到待支付订单弹窗——无法归属本次运行，不点击提交")
+        return 1
+    if pre["transient"]:
+        r.log("s4: 提交前页面处于瞬时错误态，先走恢复再提交")
+        rec = recovery.recover_transient_failure(
+            d, r.log, max_attempts=2, acted_fingerprints=set(),
+        )
+        if not rec.get("recovered"):
+            r.log("STOP: 提交前瞬时错误恢复失败——不点击提交")
+            return 1
+        root, rep = r.snap("s4_after_recovery")
+        if not order_fields_ready(rep):
+            r.log("STOP: 恢复后订单字段未就绪——不点击提交")
+            return 1
+        order = rep["order"]
+
     # ---- 4) 提交（审计记录，不拦截）：订单是否已处理由用户人工确认，
     # 大麦 App 自身有「已有待支付订单」拦截；记录仅留审计/取证用途 ----
     gate = ROOT / "logs" / "submit_record.json"
