@@ -21,7 +21,7 @@
   - 坐标缓存（E2E-13）：logs/coords_cache.json 跨次复用 CTA/票价/确定按钮坐标；
     --capture-coords 预约态预填；缓存只存坐标不存决策，点错自愈=重测一次
   - --preselect（E2E-16）：预约预选已设置时首批只点确定不点票价，
-    失败仍重测+文本匹配选档兑底
+    失败仍重测+文本匹配选档兜底
   - 文案护栏 cta_text_guard（上游 buy_button_guard 子集；挂在 Phase1 已有 dump 上零成本）
   - 证据落盘 logs/e2e_<ts>/（每阶段 XML + run.log）；订单全字段核对（金额/张数/观演人）
   - s0 自恢复 BACK 阶梯（上游 _recover_to_navigation_start 子集）
@@ -390,9 +390,14 @@ def main() -> int:
     )
     ap.add_argument(
         "--preselect", action="store_true",
-        help="预约预选已设置：面板打开即目标档，首批只点确定不点票价；"
-             "失败仍会重测+文本匹配选档兑底（订单金额核对是最终拦网）",
+        help="（默认开启）预约预选已设置：面板打开即目标档，首批只点确定不点票价；"
+             "失败仍会重测+文本匹配选档兜底（订单金额核对是最终拦网）",
     )
+    ap.add_argument(
+        "--no-preselect", dest="preselect", action="store_false",
+        help="关闭预选直点（未做预约预选的演出用；首批连点含票价+确定）",
+    )
+    ap.set_defaults(preselect=True)
     args = ap.parse_args()
     args.cache_key = args.cache_key or args.show_tag
 
@@ -540,7 +545,7 @@ def main() -> int:
             r.log("wait-open: T0 直点未进页，回退 Phase1 验证路径")
     elif cache_ok:
         xy = tuple(cache["cta_xy"])
-        r.log(f"s1: 缓存 CTA 坐标 {xy} 直点（跳过 dump；入口轮询+订单核对兑底）")
+        r.log(f"s1: 缓存 CTA 坐标 {xy} 直点（跳过 dump；入口轮询+订单核对兜底）")
         shell_taps(d, [xy])
         r.mark("cta_tap")
         entry = r.wait_for_purchase_entry(0.45)
