@@ -344,6 +344,9 @@ def main() -> int:
     # ---- 2) 票档标签计数稳定（快路径）→ 单次 dump 拿 bounds 与护栏 ----
     # 实测根因：『缺货登记』标签晚于票档框渲染；u2 文本计数 ~48ms/轮，
     # 计数在 ≥0.8s 窗口内不变且 SKU 驻留 ≥1.2s 才认定标签已定，然后 dump 一次。
+    # 实测（E2E-09 采样，2026-11-18）：热/冷启动标签均在 ~103/134ms 内全部出现
+    # 且仅变化一次。改事件驱动：首次标签变化后稳定 0.5s 即判定；
+    # 无任何变化（单档/全在售页）保留 1.2s 驻留兑底后照常 dump。
     last_tag, changed_at = None, time.monotonic()
     sku_entered_at = time.monotonic()
     tag_changes = []
@@ -354,8 +357,11 @@ def main() -> int:
         if c != last_tag:
             last_tag, changed_at = c, now
             tag_changes.append((round((now - sku_entered_at) * 1000), c))
-        elif now - changed_at >= 0.8 and now - sku_entered_at >= 1.2:
-            settled = True
+        elif last_tag and now - changed_at >= 0.5:
+            settled = True   # 有标签且已稳定：标签同帧渲染，0.5s 足以覆盖同帧内晚到者
+            break
+        elif not last_tag and now - sku_entered_at >= 1.2:
+            settled = True   # 无标签兑底：可能是单档/全在售，交 dump 与候选≠1 拦截
             break
         time.sleep(0.05)
     root, rep = r.snap("s2_tiers")
