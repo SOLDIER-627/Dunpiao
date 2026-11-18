@@ -704,6 +704,17 @@ def run(args, mode: str = "rush") -> int:
                     time.sleep(0.3)
                     root, rep = r.snap("s2_sku_retry")
                     price_xy, buy_xy = r.sku_coords(root, r.target_price)
+                if price_xy is None and (args.session_index is not None or cfg.get("date")):
+                    # 两级面板（场次→票档）：预约预选未生效时面板先显示场次列表，
+                    # 票档根本不在树里。按 --session-index / config.date 点选场次后重测。
+                    r.log("s2: 未发现票档容器（疑似两级面板场次层），尝试选场次后重测")
+                    root, tb = reflow.prepare_tiers(
+                        d, r.log, r.price_index, args.session_index,
+                        date=cfg.get("date"), city=cfg.get("city"),
+                    )
+                    if tb is not None:
+                        price_xy, buy_xy = r.sku_coords(root, r.target_price)
+                        cache_ok = False  # 面板已重选场次，旧缓存坐标不可信
                 if price_xy is None or buy_xy is None:
                     r.log(f"STOP: SKU 坐标缺失（price_index={r.price_index}，"
                           f"price={price_xy}, buy={buy_xy}）——票档序号可能超出实际票卡数")
