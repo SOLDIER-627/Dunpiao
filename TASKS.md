@@ -28,4 +28,4 @@
 > **2026-11-18 更新**：PH-04 状态分类器 v1.1 闭环——开票页/SKU 页（售罄+在售混合态）/订单确认页全部实证采样并分类；提交按钮在订单页完全可见（立即提交/可点击），提交前核对三要素（观演人/张数/总价）可机读。台账见 `docs/research/HaTickets基线固定_2026-11-18.md`。
 
 | E2E-07 | 待开始 | 移植上游 HaTickets 已验证机制进 runner（clock_sync 对时/开售等待、buy_button_guard、recovery_strategies），配置兼容上游 schema（probe_only/if_commit_order/countdown_lead_ms） | 移植项逐个有本机实测对照；不重写上游已验证逻辑；点击层保留 shell input（HyperOS 实测约束） |
-| E2E-08 | 待 E2E-07 | 热路径提速：固定 sleep 改短间隔轮询（0.1-0.2s）、每次状态检查只截一次图、非决策点跳过像素验证 | 本机实测 CTA点击→收银台 ≤5s（当前 8.6s 基线见 logs/e2e_20261118_105032/）；各阶段有前后耗时对照；提速不放松任何闸门 |
+| E2E-08 | 完成（提速部分） | 热路径提速：固定 sleep 改短间隔轮询（0.1-0.2s）、每次状态检查只截一次图、非决策点跳过像素验证 | 2026-11-18 纯流程 8.6s→5.3s（CTA→核对完成）；等待策略照上游 wait_for_page_state/poll_until（0.2s/0.05s deadline 轮询）+ wait_timeout=0（orchestrator.py:922/1042，fast_pipeline.py:61）；像素验证仅决策点；顺带修真 bug：票档标签晚于 bounds 渲染导致误选缺货档（闸门置灰检测拦停），改签名连续 3 轮稳定才判定；剩余 ~2.3s 为稳定性代价，真开票可评估快速尝试+验证兜底 |
