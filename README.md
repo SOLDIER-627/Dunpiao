@@ -48,25 +48,25 @@
 
 ## 用 AI 助手配置（推荐）
 
-连好 USB、把手机停在大麦演出详情页，然后直接对多模态 AI 助手说人话即可——
-读页面、认场次、认票档、写配置都由它做，你只负责逐项确认：
+连好 USB、把手机停在大麦演出详情页，然后对多模态 AI 助手说一句话即可。
+按模式选一条：
 
+**抢票**
 ```
-帮我配置一个新演出。手机已连好，大麦停在目标演出详情页。
-目标：11.21 周六场，看台 588 这一档。
-请用 new-show-setup skill：先 capture 采集 → 把标题/场馆/场次/票档逐项列出来
-跟我确认 → 我确认后再 apply 写配置，show_tag 用 forever_588_20261121
-```
-
-```
-大麦停在详情页了，我要蹲「周六 看台488」。
-用 show-info-extract skill 提取页面信息；当前页看不到票档就自己点进 SKU 面板
-提取（只点导航，别点确定），提取完退回来。告诉我 session_index 和 price_index，
-再给我一条可以直接跑的 reflow.py 命令（先不加 --submit）。
+手机已连好，大麦停在目标演出详情页。帮我配抢票：11.21 周六场，看台 588。
+用 skill 提取信息，跟我确认后写配置。
 ```
 
-两个 skill：`.agents/skills/show-info-extract/`（提取）、`.agents/skills/new-show-setup/`（录入）。
-更多示例提示词与 AI 边界：[docs/AI助手配置.md](docs/AI助手配置.md)
+**回流**
+```
+手机已连好，大麦停在该演出页。帮我配回流蹲守：周六场，看台 488（现在是缺货登记）。
+用 skill 确认场次和票档序号，然后给我一条可以直接跑的 reflow.py 命令。
+```
+
+AI 会提取页面（必要时点进 SKU 面板，只点导航不点确定）→ 逐项跟你确认标题/场馆/
+场次/票档 → 写 `config.local.jsonc` → 给出可复制的运行命令。
+
+前置准备与 AI 边界：[docs/AI助手配置.md](docs/AI助手配置.md)
 
 ## 配置
 
@@ -98,42 +98,17 @@
 
 ## 参考代码仓
 
-本项目是**参考上游、不自造**的产物：方法骨架来自下列开源仓库，按本机真机实测改造。
-固定基线与取舍记录见 [原理与流程](docs/原理与流程.md) 第 7 节。
+本项目是「参考上游、不自造」的产物：方法骨架来自开源实现，按本机真机实测改造。
 
-### 主基线（代码级参考）
-
-| 仓库 | 采用内容 |
+| 仓库 | 参考内容 |
 |---|---|
-| **[currycan/HaTickets](https://github.com/currycan/HaTickets)** — 固定 commit `76946bf`（Mobile 端） | 本项目的方法主线：`fast_pipeline` 四阶段热路径、`page_probe` 状态分类与阻塞弹窗词表、`recovery` 瞬时错误配对恢复、`orchestrator.verify_order_result` 提交后只读验证、`runtime_lock` 单实例锁、`event_navigator.select_session` 场次匹配、`attendee_selector` 观演人位数、`price_selector` 票档不可购词表、`buy_button_guard` 文案护栏、`sale_waiter` 开售等待骨架 |
+| **[currycan/HaTickets](https://github.com/currycan/HaTickets)** @ `76946bf`（Mobile） | **主基线**：`fast_pipeline` 四阶段热路径、`page_probe` 弹窗词表、`recovery` 瞬时错误配对、`verify_order_result` 提交后只读验证、`runtime_lock` 单实例锁、`event_navigator` 场次匹配、`attendee_selector` 观演人位数 |
+| [WECENG/ticket-purchase](https://github.com/WECENG/ticket-purchase) | 大麦选择器实证（资源 ID / 文案），交叉验证 |
+| [Szymou/NNBS](https://github.com/Szymou/NNBS) | 回流监测要点（二次回流、「我知道了」自动点）、开售时间对齐 |
+| [Lzhimie/damai-ticket-helper](https://github.com/Lzhimie/damai-ticket-helper) | 大麦 9.x 适配、票价图片化与 `session_index` 概念 |
+| [openatx/uiautomator2](https://github.com/openatx/uiautomator2) | 执行层（真机 UI 直连） |
 
-代码内的对应关系逐条列在 [原理与流程 §7](docs/原理与流程.md)（`engine.py` ↔ `fast_pipeline.py`、`recovery.py` ↔ `page_probe.py + recovery.py` 等）。
-
-### 情报与设计参考（未直接采用代码）
-
-| 仓库 | 借鉴点 |
-|---|---|
-| [WECENG/ticket-purchase](https://github.com/WECENG/ticket-purchase) | Appium 侧大麦选择器实证（资源 ID / 文案），用于交叉验证选择器表 |
-| [Lzhimie/damai-ticket-helper](https://github.com/Lzhimie/damai-ticket-helper) | 大麦 9.x 适配经验、票价图片化与 `session_index` 概念来源 |
-| [Szymou/NNBS](https://github.com/Szymou/NNBS) | 回流监测设计要点（二次回流、「我知道了」弹窗自动点、场次过滤）与开售时间对齐 |
-| [yanzilee/damaiTickets](https://github.com/yanzilee/damaiTickets) | 移动端页面探测思路；其 Web/H5 路线受风控限制的反例 |
-| [MakiNaruto/Automatic_ticket_purchase](https://github.com/MakiNaruto/Automatic_ticket_purchase) | Web/Selenium 路线代表；仅登录态与余票监控价值，购票受限 |
-| [Guyungy/damaihelper](https://github.com/Guyungy/damaihelper) | Web 控制台工程骨架参考 |
-| [DracoYan-111/damai_grab_votes](https://github.com/DracoYan-111/damai_grab_votes) | 大麦「预选」机制情报 |
-| [Pactum7/ticket-grabbing](https://github.com/Pactum7/ticket-grabbing)、[TsungShr/ticket-sniper](https://github.com/TsungShr/ticket-sniper)、[xinyi-eng/damai-mcp](https://github.com/xinyi-eng/damai-mcp) | 提交闸门、拟人节奏等设计互证 |
-
-### 工具与协议
-
-| 项目 | 用途 |
-|---|---|
-| [openatx/uiautomator2](https://github.com/openatx/uiautomator2) | 真机 UI 自动化直连（本项目的执行层） |
-| [appium/appium-uiautomator2-driver](https://github.com/appium/appium-uiautomator2-driver) | 底层同为 UiAutomator2 的旁证（我们省掉 Appium 中间层） |
-| [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) | 真机镜像/调试辅助（非运行依赖） |
-
-### 明确不采用
-
-- **Frida/Xposed 注入、签名逆向、接口直调（mtop/baxia）、验证码代解、代理池、批量注册**——违反合规红线，且社区实证大麦检测后静默限流
-- **Web/Selenium 与 H5 路线**——风控强、稳定性差，仅保留余票监控价值
+逐模块对应关系见 [原理与流程 §7](docs/原理与流程.md)。**不采用**：Frida/Xposed 注入、签名逆向、接口直调、验证码代解、代理池、批量注册；Web/Selenium 与 H5 路线（风控强）。
 
 ## 常见 STOP 与处置
 
