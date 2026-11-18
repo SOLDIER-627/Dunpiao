@@ -142,6 +142,34 @@ def analyze(root: ET.Element, package: str, activity: str | None = None) -> dict
         report["state"] = "login_blocked"
         return report
 
+    # 订单确认页识别：活动名（DmOrderActivity）或结构性标记。
+    # 与详情/SKU 页不同：提交按钮"立即提交"在此页完全可见可点击（本机实证）。
+    is_order = bool(activity and "order" in activity.lower()) or bool(
+        _text_marker_present(root, ("确认购买", "实名观演人"))
+    )
+    if is_order:
+        report["state"] = "order_confirm_page"
+        order: dict = {"submit_button": None, "quantity_text": None, "total_price_text": None}
+        for n in root.iter("node"):
+            t = _text(n)
+            if t == "立即提交" and n.get("clickable") == "true":
+                order["submit_button"] = {
+                    "bounds": _parse_bounds(n.get("bounds")),
+                    "clickable": True,
+                }
+            elif re.fullmatch(r"×\d+张", t):
+                order["quantity_text"] = t
+            elif re.fullmatch(r"¥\s*[\d.]+", t):
+                order["total_price_text"] = t
+        report["order"] = order
+        # 提交按钮可见 = 本页即提交闸门所在，警告必须带上
+        if order["submit_button"]:
+            report["warnings"].append(
+                "订单确认页：提交按钮可见且可点击，本页为最终提交闸门；"
+                "自动化到此必须停住交人工确认，绝不自动点击提交"
+            )
+        return report
+
     # SKU 页识别：活动名或票档容器结构（场次选择器缺失的售罄态也能识别）
     is_sku = bool(activity and "sku" in activity.lower()) or bool(
         _find_by_ids(root, S.PRICE_PANEL_CONTAINER_IDS)

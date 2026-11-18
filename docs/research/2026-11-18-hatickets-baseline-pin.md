@@ -89,3 +89,21 @@
 ### 状态分类器 v1 现状
 
 `detail_page` / `detail_page`（CTA 两级就绪 + 像素验证）/ `sku_page` / `sku_page_sold_out` / `login_blocked` / `order_confirm_page`（文本粗判）/ `unknown_or_other`。对照记录：`logs/probe_upstream_sku_2026-11-18.log`、`logs/probe_v2_sku_2026-11-18.json`。
+
+## 订单确认页对照（2026-11-18 10:11，李大奔 BENZO 内场 ¥780 在售态）
+
+用户点击在售票档后进入 `DmOrderActivity`（订单确认页），获得**有票态订单页完整样本**——PH-04 最后一块拼图补齐。样本：`pagesamples/sku780_*.xml` + 截图（均 gitignored；样本内嵌观演人姓名/手机号，输出一律脱敏）。
+
+### 关键发现
+
+1. **提交按钮完全可见**：`TextView text='立即提交' clickable=true bounds=[747,2515][1137,2647]`——与详情页/SKU 页 CTA 的动态模板隐藏式渲染完全不同，**订单页是原生 UI**（无障碍树完整）。词表 `SUBMIT_TEXTS` 直接命中，无需坐标锚定。
+2. **提交前核对三要素全部可读**：观演人姓名（text）、张数（`×1张`）、总价（`¥ 780.00`）均为可见文本 → 自动化提交前可做机读核对清单（姓名 vs config users、张数 vs 目标、总价 vs 票价），人工过目后再放行。
+3. **预售单风险警示**：该场 ¥780 为预售状态，页面明示"预售中，待正式开票后第一时间为您处理订单"——**此刻点"立即提交"会创建真实订单**。PH-05 必须把订单确认页设为硬闸门：流程层到 `order_confirm_page` 一律停止，`--commit` 单次授权仅放行一次提交且需人工在场。
+4. **底部结构**：`bottom_layout`（总价 + 明细链接 + 提交按钮）、分期付款 RecyclerView（`rv_installment_options`，与抢票无关，忽略）。
+5. **探针 v1.1 再升级**：新增 `order_confirm_page` 分类（活动名感知 + `ORDER_CONFIRM_MARKERS` 结构标记），报告提交按钮 bounds/可点击性、张数、总价，并强制输出提交闸门警告。离线样本验证通过。
+
+### 状态分类器 v1.1 全景
+
+`login_blocked` → `detail_page`（CTA 两级就绪 + 像素验证）→ `sku_page` / `sku_page_sold_out` → `order_confirm_page`（提交闸门警告）→ `unknown_or_other`。与上游状态机对齐，全部基于本机实证。
+
+PH-04 状态分类与选择器表**闭环**。剩余待真实场景验证项：开票瞬间 0 秒抖动行为（P3）、回流票时间窗（P4）。
