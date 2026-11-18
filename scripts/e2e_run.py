@@ -159,6 +159,16 @@ def tier_candidates(root):
     return all_tiers, [b for b in all_tiers if tuple(b) not in sold]
 
 
+def order_fields_ready(rep):
+    """订单页首帧字段已齐时复用刚取得的快照，避免重复 dump。"""
+    order = rep.get("order") or {}
+    return bool(
+        order.get("submit_button")
+        and order.get("quantity_text")
+        and order.get("total_price_text")
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--serial", default=None)
@@ -336,17 +346,23 @@ def main() -> int:
     # 计数在 ≥0.8s 窗口内不变且 SKU 驻留 ≥1.2s 才认定标签已定，然后 dump 一次。
     last_tag, changed_at = None, time.monotonic()
     sku_entered_at = time.monotonic()
+    tag_changes = []
     settled = False
     while time.monotonic() < sku_entered_at + 5.0:
         c = d(text="缺货登记").count
         now = time.monotonic()
         if c != last_tag:
             last_tag, changed_at = c, now
+            tag_changes.append((round((now - sku_entered_at) * 1000), c))
         elif now - changed_at >= 0.8 and now - sku_entered_at >= 1.2:
             settled = True
             break
         time.sleep(0.05)
     root, rep = r.snap("s2_tiers")
+    r.log(
+        f"s2: 标签时间线(ms,count)={tag_changes}，"
+        f"稳定等待={round((time.monotonic() - sku_entered_at) * 1000)}ms"
+    )
     if not rep["state"].startswith("sku"):
         r.log(f"STOP: 标签稳定时状态异常（state={rep['state']}）")
         return 1
@@ -384,12 +400,13 @@ def main() -> int:
     r.log("s2: 到达订单确认页")
 
     # ---- 3) 等订单字段渲染 → 全字段核对（不提交时到此为止）----
-    root, rep = r.wait_until(
-        lambda rt, p: bool((p.get("order") or {}).get("submit_button"))
-        and bool((p.get("order") or {}).get("quantity_text"))
-        and bool((p.get("order") or {}).get("total_price_text")),
-        "s3_load", timeout=3.0, poll_interval=POLL_FAST,
-    )
+    # 正式提交仍做第二次快照，以较新的页面内容进行订单核对；
+    # 无提交演练可复用字段齐全的首帧，减少一次完整 dump。
+    if args.submit or not order_fields_ready(rep):
+        root, rep = r.wait_until(
+            lambda rt, p: order_fields_ready(p),
+            "s3_load", timeout=3.0, poll_interval=POLL_FAST,
+        )
     if root is None:
         r.log(f"STOP: 订单字段未在有界时间内就绪（order={rep.get('order')}）")
         return 1
