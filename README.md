@@ -26,7 +26,8 @@
 #    Mac + 安卓真机 USB 调试已授权；.venv/bin/python 3.12 + uiautomator2；
 #    大麦已登录且实名观演人已在 App 内配好；系统动画三档缩放=0
 
-# 1) 提取当前页面信息（只读零点击）——确认场次/票档序号
+# 1) 配置：连好 USB、手机停在演出详情页，交给 AI 助手（见「用 AI 助手配置」）
+#    或手动提取当前页信息（只读零点击）确认场次/票档序号
 .venv/bin/python scripts/show_info.py --serial <serial>
 
 # 2) 演练（不提交，停在提交前核对）
@@ -43,7 +44,29 @@
     --reflow-interval 2 --reflow-refresh 15 --reflow-max-minutes 300
 ```
 
-详细说明：[抢票模式](docs/抢票模式.md) · [回流模式](docs/回流模式.md) · [原理与流程](docs/原理与流程.md)
+详细说明：[抢票模式](docs/抢票模式.md) · [回流模式](docs/回流模式.md) · [原理与流程](docs/原理与流程.md) · [AI 助手配置](docs/AI助手配置.md)
+
+## 用 AI 助手配置（推荐）
+
+连好 USB、把手机停在大麦演出详情页，然后直接对多模态 AI 助手说人话即可——
+读页面、认场次、认票档、写配置都由它做，你只负责逐项确认：
+
+```
+帮我配置一个新演出。手机已连好，大麦停在目标演出详情页。
+目标：11.21 周六场，看台 588 这一档。
+请用 new-show-setup skill：先 capture 采集 → 把标题/场馆/场次/票档逐项列出来
+跟我确认 → 我确认后再 apply 写配置，show_tag 用 forever_588_20261121
+```
+
+```
+大麦停在详情页了，我要蹲「周六 看台488」。
+用 show-info-extract skill 提取页面信息；当前页看不到票档就自己点进 SKU 面板
+提取（只点导航，别点确定），提取完退回来。告诉我 session_index 和 price_index，
+再给我一条可以直接跑的 reflow.py 命令（先不加 --submit）。
+```
+
+两个 skill：`.agents/skills/show-info-extract/`（提取）、`.agents/skills/new-show-setup/`（录入）。
+更多示例提示词与 AI 边界：[docs/AI助手配置.md](docs/AI助手配置.md)
 
 ## 配置
 
@@ -92,6 +115,7 @@ README.md                本文（总览 + 快速开始）
 docs/抢票模式.md          抢票：开售倒计时、预选、命令速查
 docs/回流模式.md          回流：监听机制、两级面板、刷新节奏
 docs/原理与流程.md        机制细节、设计纪律、耗时模型、上游对应
+docs/AI助手配置.md        Skill 使用指南 + 示例提示词
 scripts/rush.py          抢票入口
 scripts/reflow.py        回流入口
 scripts/show_info.py     页面信息提取（只读）
