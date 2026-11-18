@@ -12,10 +12,11 @@
                    实名观演人/立即提交（0.02s 粒度）；失败回退元素点击（0.55s 轮询）
   Phase 5 订单页   观演人 checkbox 补选（上游 _finish_confirm；只点未勾选的，
                    元素点击后验 checked，失效则 shell 兜底）→ 全字段核对 →
-                   （--submit 时）单次提交闸门 → 收银台即停
+                   （--submit 时）审计记录 → 点击提交 → 收银台即停
 
 保留的本仓库设施（上游方法之外的审计/合规层，不参与点击决策）：
-  - 提交闸门体系：--submit 单次授权、submit_record.json、--clear-record、收银台即停
+  - 提交审计：--submit 真实提交、submit_record.json（仅审计不拦截，订单
+    是否已处理由用户人工确认，App 自身有待支付拦截）、收银台即停
   - --wait-open：clock_sync 开售等待 + prewarm（上游 sale_waiter 骨架，E2E-07 成果）
   - 坐标缓存（E2E-13）：logs/coords_cache.json 跨次复用 CTA/票价/确定按钮坐标；
     --capture-coords 预约态预填；缓存只存坐标不存决策，点错自愈=重测一次
@@ -308,14 +309,14 @@ def main() -> int:
     ap.add_argument("--serial", default=None)
     ap.add_argument("--expected-total", default="780.00")
     ap.add_argument("--submit", action="store_true", help="单次授权真实提交（默认关闭）")
-    ap.add_argument("--show-tag", default="libenben_780_20261128", help="提交闸门记录的演出标识")
+    ap.add_argument("--show-tag", default="libenben_780_20261128", help="提交审计记录的演出标识")
     ap.add_argument(
         "--force-override-once", action="store_true",
-        help="同演出已有活跃提交记录时覆盖一次（需人工确认历史订单已取消/未付款）",
+        help="（已废弃）提交闸门不再拦截，保留参数仅为兼容旧命令",
     )
     ap.add_argument(
         "--clear-record", action="store_true",
-        help="人工已取消/处理完订单后闭环记录（标记 cancelled_by_user，闸门重新放行）",
+        help="（可选）人工处理完订单后把审计记录标记为 cancelled_by_user（不再拦截提交，仅整洁审计）",
     )
     ap.add_argument(
         "--wait-open", metavar="HH:MM|YYYY-MM-DD HH:MM",
@@ -361,7 +362,7 @@ def main() -> int:
                 x["resolved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
                 n += 1
         gate.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
-        print(f"已把 {args.show_tag} 的 {n} 条提交记录标记为 cancelled_by_user，闸门重新放行")
+        print(f"已把 {args.show_tag} 的 {n} 条提交记录标记为 cancelled_by_user（仅审计标记，不影响提交）")
         return 0
 
     import uiautomator2 as u2
@@ -654,19 +655,18 @@ def main() -> int:
         r.log("RESULT: ✅ 端到端（无提交）通过——已到订单页且全字段核对一致，停在提交前")
         return 0
 
-    # ---- 4) 单次提交闸门：先记录后点击，活跃记录拦截 ----
+    # ---- 4) 提交（审计记录，不拦截）：订单是否已处理由用户人工确认，
+    # 大麦 App 自身有「已有待支付订单」拦截；记录仅留审计/取证用途 ----
     gate = ROOT / "logs" / "submit_record.json"
     records = json.loads(gate.read_text(encoding="utf-8")) if gate.exists() else []
-    active = [
+    prior_unpaid = [
         x for x in records
         if x.get("show_tag") == args.show_tag
-        and x.get("status") in ("submitted_intent", "awaiting_user_payment")
+        and x.get("status") == "awaiting_user_payment"
     ]
-    if active and not args.force_override_once:
-        r.log(f"STOP: 演出 {args.show_tag} 有一笔活跃待处理提交（{active[-1]['time']}，"
-              f"status={active[-1].get('status')}）；订单已取消/处理完先跑 --clear-record，"
-              "或本次覆盖用 --force-override-once")
-        return 1
+    if prior_unpaid:
+        r.log(f"⚠️ 注意：此前有一笔待支付提交（{prior_unpaid[-1]['time']}）——"
+              "若未处理，大麦会以「已有待支付订单」拦截本次提交")
     records.append({
         "time": datetime.datetime.now().isoformat(timespec="seconds"),
         "show_tag": args.show_tag,
@@ -675,7 +675,7 @@ def main() -> int:
         "evidence": out.name,
     })
     gate.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
-    r.log("s4: 【单次授权】点击『立即提交』——此后不盲重试，到收银台即停")
+    r.log("s4: 点击『立即提交』（提交前核对已全过）——此后不盲重试，到收银台即停")
     r.tap(order["submit_button"]["bounds"], "立即提交")
 
     # ---- 5) 收银台即停（上游同款思路：轻量轮询 activity，命中才 dump 取证）----
