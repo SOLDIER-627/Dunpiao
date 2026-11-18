@@ -760,6 +760,12 @@ def main() -> int:
     # 「订单已提交/提交中」文本视为仍在推进继续等
     deadline = time.monotonic() + 20.0
     act = ""
+    # 「抢票人数太多/繁忙」类瞬时弹窗（上游 TRANSIENT_ERROR + _RETRY_ACTION_TEXTS
+    # 同类：识别归入瞬时错误，自动点重试按钮恢复；纯页面交互无合规问题）。
+    # 15:00 sandy 实战「收银台未现」的真实原因就是这类弹窗挂在屏上。
+    retry_btn_texts = ("继续尝试", "重新尝试", "再试一次", "点击重试")
+    retry_taps = 0
+    last_popup_check = 0.0
     while time.monotonic() < deadline:
         act = d.app_current().get("activity", "")
         if "MspContainerActivity" in act:
@@ -776,6 +782,18 @@ def main() -> int:
             r.mark("cashier")
             r.log(f"RESULT: ✅ 提交成功到达收银台——待用户支付，流程终止")
             return 0
+        # 瞬时弹窗快查（~0.7s 一次，u2 轻查询非 dump）：命中则 shell 点重试
+        now = time.monotonic()
+        if retry_taps < 5 and now - last_popup_check >= 0.7:
+            last_popup_check = now
+            for t in retry_btn_texts:
+                btn = d(text=t)
+                if btn.exists:
+                    bb = btn.info.get("bounds") or {}
+                    r.log(f"s5: 瞬时弹窗（{t}），自动点重试恢复（第 {retry_taps + 1} 次）")
+                    shell_taps(d, [center((bb["left"], bb["top"], bb["right"], bb["bottom"]))])
+                    retry_taps += 1
+                    break
         time.sleep(POLL_PAGE)
     r.log(f"STOP: 提交后未检测到收银台（activity={act.split('.')[-1]}）——不盲重试，交人工")
     return 1
