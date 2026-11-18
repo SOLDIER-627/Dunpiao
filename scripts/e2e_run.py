@@ -1,18 +1,40 @@
 # -*- coding: utf-8 -*-
-"""E2E 单进程运行器——详情页待命 → SKU → 订单核对 →（可选单次提交）→ 收银台即停。
+"""E2E 单进程运行器——完全采用上游 HaTickets fast_pipeline 方法（2026-11-18 重构）。
 
-等待策略照上游 HaTickets orchestrator 的实现，不自造 sleep：
-- 页面态轮询：deadline + poll_interval=0.2（orchestrator.py:1042 wait_for_page_state）
-- 就绪/热路径轮询：poll_interval=0.05（fast_pipeline.py:61 poll_until 默认值）
-- u2 内部等待关闭：settings["wait_timeout"]=0, operation_delay=(0,0)（orchestrator.py:922）
-- 点击后立即进入轮询，无固定 post-click sleep
-- 像素验证只在决策点做（CTA/确定按钮），中间态只 dump 不截图
+核心流程 = 上游 fast_pipeline.run_cold_validation 四阶段（旁路-02 实测 0.86s）：
+  Phase 1 详情页   单次 dump → CTA 容器坐标 → 文案护栏（零成本，同一 dump）→ shell 点击
+  Phase 2 入口等待 上游 _wait_for_purchase_entry：SKU 标记/确认页 快查询 0.45s@0.03；
+                   超时回退 shell 双击（上游 _open_purchase_panel）
+  Phase 3 SKU 页   单次 dump → 票价卡中心（flowlayout 子 FrameLayout+clickable 取
+                   config.price_index）+ btn_buy_view 中心；缺票价 → 0.3s 后重 dump 一次
+  Phase 4 shell 连点  上游 _shell_price_and_buy_until_confirm：单条 shell 命令
+                   [票价, 确定, 确定] 循环 ≤0.9s，确认判定 = checkbox/确认购买/
+                   实名观演人/立即提交（0.02s 粒度）；失败回退元素点击（0.55s 轮询）
+  Phase 5 订单页   观演人 checkbox 补选（上游 _finish_confirm；只点未勾选的，
+                   元素点击后验 checked，失效则 shell 兜底）→ 全字段核对 →
+                   （--submit 时）单次提交闸门 → 收银台即停
+
+保留的本仓库设施（上游方法之外的审计/合规层，不参与点击决策）：
+  - 提交闸门体系：--submit 单次授权、submit_record.json、--clear-record、收银台即停
+  - --wait-open：clock_sync 开售等待 + prewarm（上游 sale_waiter 骨架，E2E-07 成果）
+  - 文案护栏 cta_text_guard（上游 buy_button_guard 子集；挂在 Phase1 已有 dump 上零成本）
+  - 证据落盘 logs/e2e_<ts>/（每阶段 XML + run.log）；订单全字段核对（金额/张数/观演人）
+  - s0 自恢复 BACK 阶梯（上游 _recover_to_navigation_start 子集）
+
+已删除的旧机制（被上游方法取代）：
+  - 缺货标签计数稳定窗口（事件驱动 0.5s）——上游按 price_index 索引直点
+  - 确定按钮像素亮橙轮询——上游直点+确认页出现判定
+  - CTA 亮橙等待——上游单 dump 取坐标直接点
+  - --rush 参数成为默认行为（保留参数仅为兼容，传入无效果）
 
 用法：
     .venv/bin/python scripts/e2e_run.py                # 无提交，到订单页核对即停
     .venv/bin/python scripts/e2e_run.py --submit       # 单次提交到收银台（先记录后点击）
     .venv/bin/python scripts/e2e_run.py --clear-record # 人工取消订单后闭环闸门记录
+    .venv/bin/python scripts/e2e_run.py --wait-open HH:MM [--submit]
 """
+from __future__ import annotations
+
 import argparse
 import datetime
 import json
@@ -32,12 +54,20 @@ from src.dunpiao import clock_sync  # noqa: E402
 POLL_PAGE = 0.2   # 页面态轮询间隔（上游 wait_for_page_state 默认）
 POLL_FAST = 0.05  # 就绪检查轮询间隔（上游 poll_until 默认）
 
-# ---- buy_button_guard 文案护栏（照抄上游 buy_button_guard.py，含 issue 注记）----
-# 只有可购文案才视为安全；预约/预售类文案一律拦截。本机 Canvas 自绘 CTA 无文案
-# 节点时由像素闸门决定；一旦出现文案则必须过文案护栏。
+# ---- 关键资源（上游 fast_pipeline / price_selector / orchestrator 同款）----
+FLOWLAYOUT = "cn.damai:id/project_detail_perform_price_flowlayout"
+LAYOUT_SKU = "cn.damai:id/layout_sku"
+TV_PRICE_NAME = "cn.damai:id/tv_price_name"
+BTN_BUY = "cn.damai:id/btn_buy_view"
+CHECKBOX = "cn.damai:id/checkbox"
+CTA_CONTAINER = "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+SKU_MARKERS = (FLOWLAYOUT, LAYOUT_SKU, TV_PRICE_NAME)      # 上游 sku_selectors 子集
+CONFIRM_TEXTS = ("确认购买", "实名观演人", "立即提交")       # 上游 _confirm_page_ready
+
+# ---- buy_button_guard 文案护栏（照抄上游 buy_button_guard.py）----
 SAFE_TEXTS = frozenset({
-    "立即购买", "立即购票", "立即抢票", "立即预定", "立即预订",  # issue #29
-    "Book Now",  # 国际化兑底（issue #29）
+    "立即购买", "立即购票", "立即抢票", "立即预定", "立即预订",
+    "Book Now",
     "选座购买", "购买", "抢票", "预定",
 })
 BLOCKED_TEXTS = frozenset({
@@ -46,10 +76,7 @@ BLOCKED_TEXTS = frozenset({
 
 
 def cta_text_guard(root, bounds):
-    """决策点文案护栏：CTA 区域内出现 BLOCKED 文案则拒绝点击。
-
-    返回 (allow, note)。无任何文案节点（本机 Canvas 自绘常态）→ 放行给像素闸门。
-    """
+    """文案护栏：CTA 区域内出现 BLOCKED 文案则拒绝点击（挂已有 dump，零成本）。"""
     if not bounds:
         return True, "no_bounds"
     x1, y1, x2, y2 = bounds
@@ -61,7 +88,6 @@ def cta_text_guard(root, bounds):
         nb = parse_bounds(n.get("bounds"))
         if not nb:
             continue
-        # 与 CTA 容器区域相交才纳入护栏范围
         if nb[0] < x2 and nb[2] > x1 and nb[1] < y2 and nb[3] > y1:
             if text in BLOCKED_TEXTS:
                 return False, f"blocked_text:{text}"
@@ -74,12 +100,37 @@ def parse_bounds(s):
     return [int(x) for x in re.findall(r"\d+", s)] if s else None
 
 
+def center(b):
+    return ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+
+
+def on_screen(b, w, h):
+    return 0 <= b[0] < b[2] <= w and 0 <= b[1] < b[3] <= h
+
+
+def shell_taps(d, coords):
+    """上游 batch_shell_taps：多条 input tap 拼进单条 shell 命令。"""
+    if coords:
+        d.shell("; ".join(f"input tap {x} {y}" for x, y in coords))
+
+
+def confirm_page_ready_u2(d) -> bool:
+    """上游 _confirm_page_ready：checkbox 或三个文本标记任一命中。"""
+    if d(resourceId=CHECKBOX).exists:
+        return True
+    for t in CONFIRM_TEXTS:
+        if d(textContains=t).exists:
+            return True
+    return False
+
+
 class Runner:
     def __init__(self, d, out: Path, expected_total: str):
         self.d = d
         self.out = out
         self.expected = Decimal(expected_total)
         self.out.mkdir(parents=True, exist_ok=True)
+        self.w, self.h = d.window_size()
 
     def log(self, msg: str) -> None:
         line = f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}"
@@ -88,7 +139,7 @@ class Runner:
             f.write(line + "\n")
 
     def snap(self, tag: str, pixel: bool = False):
-        """一次 dump 分析；像素验证只在决策点（pixel=True）做。"""
+        """一次 dump + 本地解析；像素验证只在 prewarm 决策点做。"""
         xml = self.d.dump_hierarchy()
         (self.out / f"{tag}.xml").write_text(xml, encoding="utf-8")
         root = ET.fromstring(xml)
@@ -104,11 +155,7 @@ class Runner:
         return root, rep
 
     def fast_poll(self, fn, tag: str, timeout: float, poll: float = 0.05):
-        """u2 快查询轮询（实测 ~50ms/轮，不 dump 不截图）。
-
-        上游 rush_mode 同思路（单 ID 选择器 ~60ms/轮）；dump 只留给必须
-        读文本/标签的关键点。返回 True/False。
-        """
+        """u2 快查询轮询（~50ms/轮，不 dump 不截图），异常重试。"""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -134,29 +181,102 @@ class Runner:
         return None, last[1]
 
     def tap(self, bounds, label: str) -> None:
-        x1, y1, x2, y2 = bounds
-        x, y = (x1 + x2) // 2, (y1 + y2) // 2
+        x, y = center(bounds)
         self.log(f"点击 {label} ({x},{y})")
         self.d.shell(f"input tap {x} {y}")
 
+    # ---- Phase 2：入口等待（上游 _wait_for_purchase_entry 0.45s@0.03）----
+    def wait_for_purchase_entry(self, timeout: float = 0.45):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if any(self.d(resourceId=rid).exists for rid in SKU_MARKERS):
+                return "sku_page"
+            if confirm_page_ready_u2(self.d):
+                return "order_confirm_page"
+            time.sleep(0.03)
+        return None
 
-def tier_candidates(root):
-    """在售票档 = 容器内无『缺货登记』标签的档（XML 层判别，实测结论）。
-    返回 (全部档, 在售档)。标签后于 bounds 渲染，调用方必须等签名稳定。"""
-    sold, tiers = set(), []
-    for n in root.iter("node"):
-        if (n.get("resource-id") or "").endswith(
-            "project_detail_perform_price_flowlayout"
-        ):
-            for tier in n:
-                tb = parse_bounds(tier.get("bounds"))
-                tiers.append(tb)
-                if any(
-                    (t.get("text") or "").strip() == "缺货登记" for t in tier.iter("node")
-                ):
-                    sold.add(tuple(tb))
-    all_tiers = [b for b in tiers if b]
-    return all_tiers, [b for b in all_tiers if tuple(b) not in sold]
+    # ---- Phase 3：SKU 单 dump 取票价+确定按钮双坐标（上游 price_selector 同款）----
+    def sku_coords(self, root):
+        price_xy = buy_xy = None
+        for node in root.iter("node"):
+            rid = node.get("resource-id") or ""
+            if buy_xy is None and rid == BTN_BUY:
+                b = parse_bounds(node.get("bounds") or "")
+                if b and on_screen(b, self.w, self.h):
+                    buy_xy = center(b)
+            if price_xy is None and rid in (FLOWLAYOUT, "cn.damai:id/layout_price"):
+                cards = [
+                    c for c in node
+                    if c.get("class") == "android.widget.FrameLayout"
+                    and c.get("clickable") == "true"
+                ]
+                if 0 <= self.price_index < len(cards):
+                    b = parse_bounds(cards[self.price_index].get("bounds") or "")
+                    if b and on_screen(b, self.w, self.h):
+                        price_xy = center(b)
+        return price_xy, buy_xy
+
+    # ---- Phase 4：shell 批量连点直到确认页（上游 ≤0.9s 循环）----
+    def shell_price_and_buy_until_confirm(self, price_xy, buy_xy) -> bool:
+        shell_end = time.monotonic() + 0.9
+        while time.monotonic() < shell_end:
+            shell_taps(self.d, [price_xy, buy_xy, buy_xy])
+            poll_end = min(shell_end, time.monotonic() + 0.9)
+            while time.monotonic() < poll_end:
+                if confirm_page_ready_u2(self.d):
+                    return True
+                time.sleep(0.02)
+        return False
+
+    # ---- Phase 4 回退：元素点击（上游 _select_price_with_pipeline /
+    #      _click_sku_buy_with_pipeline；本机 HyperOS 可能拒无障碍点击）----
+    def element_click_price(self) -> bool:
+        try:
+            fl = self.d(resourceId=FLOWLAYOUT)
+            if not fl.exists:
+                return False
+            cards = fl.child(className="android.widget.FrameLayout", clickable=True)
+            if cards.count > self.price_index:
+                cards[self.price_index].click()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def element_click_buy(self) -> bool:
+        try:
+            btn = self.d(resourceId=BTN_BUY)
+            if btn.exists:
+                btn.click()
+                return True
+        except Exception:
+            pass
+        return False
+
+    # ---- Phase 5 前置：观演人 checkbox 补选（上游 _finish_confirm）----
+    def finish_attendees(self) -> tuple[int, int, int]:
+        """返回 (checkbox 总数, 已勾选数, shell 兜底次数)。只点未勾选的。"""
+        boxes = self.d(resourceId=CHECKBOX)
+        n = boxes.count
+        shell_fb = 0
+        for i in range(n):
+            el = boxes[i]
+            if el.info.get("checked"):
+                continue
+            try:
+                el.click()  # 上游元素点击优先
+            except Exception:
+                pass
+            if not el.info.get("checked"):
+                # 本机实证：HyperOS 拒 u2 无障碍点击（click 成功但 checked 不变）
+                b = el.info["bounds"]
+                shell_taps(self.d, [center((b["left"], b["top"], b["right"], b["bottom"]))])
+                shell_fb += 1
+        checked = sum(
+            1 for i in range(n) if boxes[i].info.get("checked")
+        ) if n else 0
+        return n, checked, shell_fb
 
 
 def order_fields_ready(rep):
@@ -197,9 +317,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--rush", action="store_true",
-        help="快速模式：跳过缺货标签判定与稳定窗口，按 config 的 price_index 直点目标票档"
-             "（确定按钮像素+文案闸门兜底）。仅用于已用向导确认过票档序号的演出；"
-             "错选代价=闸门拦停一次尝试（可 BACK 重试），不是下错单",
+        help="（已废弃）上游 rush 方法已成默认行为；保留参数仅为兼容旧命令",
     )
     args = ap.parse_args()
 
@@ -226,8 +344,13 @@ def main() -> int:
     d.settings["wait_timeout"] = 0
     d.settings["operation_delay"] = (0, 0)
     r = Runner(d, out, args.expected_total)
+    if not isinstance(cfg.get("price_index"), int) or isinstance(cfg.get("price_index"), bool):
+        r.log("STOP: config.local.jsonc 缺少已确认的 price_index（用向导 capture 后 apply 写入）")
+        return 1
+    r.price_index = int(cfg["price_index"])
     r.log(f"=== E2E 运行开始（submit={'ON' if args.submit else 'OFF'}，"
-          f"expected_total={args.expected_total}）===")
+          f"expected_total={args.expected_total}，price_index={r.price_index}，"
+          f"上游 fast_pipeline 方法）===")
 
     # ---- 0) 自恢复到详情页（BACK 后 deadline 轮询，不点任何业务按钮）----
     root, rep = r.snap("s0_check")
@@ -241,7 +364,6 @@ def main() -> int:
                 lambda rt, p: p["state"] == "detail_page",
                 f"s0_back_{i}", timeout=3.0, poll_interval=POLL_PAGE,
             )
-            # 超时不 break：下一轮继续 BACK（上游 _recover_to_navigation_start 阶梯）
         else:
             break
     if rep.get("state") != "detail_page":
@@ -249,6 +371,7 @@ def main() -> int:
         return 1
 
     # ---- 0.5) 开售等待模式（上游 wait_for_sale_start 骨架：clock_sync + lead 轮询）----
+    prewarm_ok = False
     if args.wait_open:
         raw = args.wait_open
         try:
@@ -256,7 +379,7 @@ def main() -> int:
             if len(raw) > 5:
                 naive = datetime.datetime.strptime(raw, "%Y-%m-%d %H:%M")
             else:
-                # strptime("%H:%M") 默认年份 1900（实测踩坑：目标落到过去、倒计时为负、提前点击）
+                # strptime("%H:%M") 默认年份 1900（实测踩坑：目标落到过去、倒计时为负）
                 naive = datetime.datetime.combine(
                     rough_wall.date(), datetime.datetime.strptime(raw, "%H:%M").time()
                 )
@@ -264,13 +387,12 @@ def main() -> int:
             r.log(f"STOP: 无法解析开售时刻 {raw!r}（支持 HH:MM 或 YYYY-MM-DD HH:MM）")
             return 1
         obs = clock_sync.sample_clock()
-        # 实测踩坑：anchor 两采样点必须紧邻且在 sample_clock 之后——
-        # sntp 耗时 1~3s，夹在中间会让 deadline 整体晚同样多（首次实测晚 1.77s）
+        # anchor 两采样点必须紧邻且在 sample_clock 之后（实测踩坑：晚 1.77s）
         anchor_wall = datetime.datetime.now().astimezone()
         anchor_mono = time.monotonic()
         target = naive.replace(tzinfo=anchor_wall.tzinfo)
         if target <= anchor_wall:
-            target += datetime.timedelta(days=1)  # 已过 → 明天
+            target += datetime.timedelta(days=1)
         dl = clock_sync.build_monotonic_sale_deadline(
             target, anchor_wall, anchor_mono, obs,
         )
@@ -281,15 +403,12 @@ def main() -> int:
                   "确信无误可用 --ignore-clock-trust")
             return 1
         lead = args.countdown_lead_ms / 1000.0
-        # a) lead 之前：详情页待命，零点击零 dump；0.05s 粒度避免 sleep 过冲累积漂移
-        #    （上游 sale_waiter 同款 sleep(min(0.05, remaining))，实测 1s 粒度会漂 ~1.7s/百秒）
         while True:
             remaining = dl.remaining_seconds(time.monotonic())
             if remaining <= lead:
                 break
             time.sleep(min(0.05, remaining - lead))
         r.log(f"wait-open: 进入 lead 窗口（{args.countdown_lead_ms}ms），prewarm 取基线快照")
-        # b) lead 窗口：prewarm 快照（只读）——坐标/像素基线/文案护栏，供 T0 直点
         root, rep = r.snap("s1_prewarm", pixel=True)
         if not rep["cta"].get("container_present"):
             r.log("STOP: prewarm 时 CTA 容器不可见——页面结构异常，不盲等")
@@ -301,173 +420,94 @@ def main() -> int:
             r.log(f"wait-open: prewarm 文案护栏拦截（{note}）——T0 后走验证路径")
         else:
             r.log(f"wait-open: prewarm 就绪（likely_active={prewarm_ok}，{note}）")
-        # c) 到点：deadline 前 0.05s 粒度待命（上游同款 min(0.05, remaining)）
         while True:
             remaining = dl.remaining_seconds(time.monotonic())
             if remaining <= 0:
                 break
             time.sleep(min(0.05, remaining))
         r.log("wait-open: 到点，进入点击窗口")
-        # c2) T0 直点前廉价闸门（上游 _scheduled_sale_click_gate 思路）：
-        #     只验 activity 未变（~50ms），不做全量 dump（~0.4s 会吃掉 T0 窗口）
+        # T0 直点前廉价闸门（上游 _scheduled_sale_click_gate 思路）：只验 activity
         if prewarm_ok and "ProjectDetailActivity" not in d.app_current().get("activity", ""):
             prewarm_ok = False
             r.log("wait-open: T0 前 activity 变化，放弃直点走验证路径")
 
-    # ---- 1) CTA 点击：T0 直点（prewarm）优先，否则亮橙闸门 + 文案护栏 ----
-    root = None
-    entered_fast = False
+    # ---- Phase 1+2：CTA 点击（T0 直点优先，否则单 dump 坐标）+ 入口等待 ----
+    entered_order = False
+    entry = None
     if args.wait_open and prewarm_ok:
-        r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA（prewarm T0 直点）")
-        flow = d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
-        if r.fast_poll(lambda: flow.exists, "s1_after_t0", timeout=3.0):
-            entered_fast = True
-            r.log("s1: T0 直点进入 SKU 页（快查询确认）")
-    if not entered_fast:
-        root, rep = r.wait_until(
-            lambda rt, p: p["cta"].get("likely_active") is True,
-            "s1_waitcta",
-            timeout=5.0 if not args.wait_open else 8.0,
-            poll_interval=POLL_FAST, pixel=True,
-        )
-        if root is None:
-            r.log(f"STOP: CTA 未呈亮橙可购态（appearance={rep['cta'].get('appearance_hint')}）")
+        cta_b = rep["cta"]["container_bounds"]
+        r.tap(cta_b, "详情页购票 CTA（prewarm T0 直点）")
+        entry = r.wait_for_purchase_entry(3.0)
+        if entry is None:
+            r.log("wait-open: T0 直点未进页，回退 Phase1 验证路径")
+    if not (args.wait_open and prewarm_ok and entry is not None):
+        # 上游 rush_preselect_and_buy_via_xml：单 dump → CTA 坐标 → shell 点击
+        root, rep = r.snap("s1_detail")
+        cta_b = rep["cta"].get("container_bounds")
+        if not cta_b:
+            r.log("STOP: 详情页未找到购票 CTA 容器")
             return 1
-        allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
+        allow, note = cta_text_guard(root, cta_b)
         if not allow:
             r.log(f"STOP: CTA 文案护栏拦截（{note}）——疑似预约/预售态，不点击")
             return 1
         if note and note != "no_text":
             r.log(f"s1: CTA 文案护栏通过（{note}）")
-        r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA")
-        # 快路径：票价容器出现即 SKU 页（u2 查询 ~50ms/轮 vs dump 轮 ~300ms/轮）
-        flow = d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
-        if not r.fast_poll(lambda: flow.exists, "s1_skupoll", timeout=2.5):
-            r.log("STOP: 点击 CTA 后票价容器未出现（未进 SKU 或页面结构变化）")
-            return 1
-        root = None  # 状态由 s2_tiers 的 dump 统一验证
-    r.log("s1: 进入 SKU 页（快查询确认）")
-
-    # ---- 2) 票档定位与点击：rush 模式直点序号；默认走标签计数稳定（快路径）----
-    rush_idx = int(cfg["price_index"]) if args.rush and cfg.get("price_index") is not None else None
-    if args.rush and rush_idx is None:
-        r.log("STOP: --rush 需要 config.local.jsonc 里已确认的 price_index（用向导 capture 后 apply 写入）")
+        r.tap(cta_b, "详情页购票 CTA")
+        entry = r.wait_for_purchase_entry(0.45)
+        if entry is None:
+            # 上游 _open_purchase_panel 回退：shell 双击再等一次
+            r.log("s1: 入口等待超时，回退 CTA 双击重试")
+            shell_taps(d, [center(cta_b), center(cta_b)])
+            entry = r.wait_for_purchase_entry(0.45)
+    if entry is None:
+        r.log("STOP: CTA 点击后未进入 SKU/订单页")
         return 1
-    if rush_idx is not None:
-        # rush（照上游 price_selector._click_price_option_by_config_index）：
-        # 不等标签稳定、不 dump，按确认过的 price_index 直点。child 必须
-        # 按 className+clickable 过滤后再取 index（实测无过滤时 index 语义
-        # 是“任意后代的首子”，坐标错位）。错选兑底=确定按钮像素闸门 +
-        # 订单金额核对（错选代价=一次失败尝试，不是下错单）
-        fl = d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
-        cards = fl.child(className="android.widget.FrameLayout", clickable=True)
-        screen_w, screen_h = d.window_size()
-
-        def _tier_ready():
-            # 不存在/超界时 .info 抛异常，fast_poll 异常重试；入场动画期间
-            # bounds 可能停在屏外中间态（实测 x=1903>屏宽，y 已就位），
-            # 仅当 bounds 落在屏内才认定就绪
-            bb = cards[rush_idx].info["bounds"]
-            return 0 <= bb["left"] < bb["right"] <= screen_w and 0 <= bb["top"] < bb["bottom"] <= screen_h
-
-        if not r.fast_poll(_tier_ready, "s2_rushtier", timeout=3.0):
-            r.log(f"STOP: rush 目标票档未渲染或 bounds 异常（index={rush_idx}）")
-            return 1
-        b = cards[rush_idx].info["bounds"]
-        r.tap([b["left"], b["top"], b["right"], b["bottom"]],
-              f"rush 直点目标票档 index={rush_idx}")
-        # rush 确定按钮：照上游 rush 哲学——bounds 屏内即直点，不查亮橙；
-        # 「确认就绪」判定=订单页字段出现（下一段 orderpoll）。置灰点击无
-        # 效果→orderpoll 超时 STOP；选错档→订单金额核对拦在提交前
-        btn = d(resourceId="cn.damai:id/btn_buy_view")
-        screen_w2, screen_h2 = d.window_size()
-
-        def _btn_ready():
-            bb = btn.info["bounds"]  # 不存在时抛异常，fast_poll 重试
-            return 0 <= bb["left"] < bb["right"] <= screen_w2 and 0 <= bb["top"] < bb["bottom"] <= screen_h2
-
-        if not r.fast_poll(_btn_ready, "s2_confirmbtn", timeout=2.0):
-            r.log("STOP: rush 未定位到确定按钮（btn_buy_view）")
-            return 1
-        bb = btn.info["bounds"]
-        r.tap([bb["left"], bb["top"], bb["right"], bb["bottom"]], "SKU 确定按钮")
+    if entry == "order_confirm_page":
+        entered_order = True
+        r.log("s1: 直达订单确认页（未展开 SKU）")
     else:
-        # 默认稳版：标签计数稳定（事件驱动）→ 单次 dump 拿 bounds 与护栏
-        # 实测根因：『缺货登记』标签晚于票档框渲染；u2 文本计数 ~48ms/轮。
-        # 实测（E2E-09 采样，2026-11-18）：热/冷启动标签均在 ~103/134ms 内全部出现
-        # 且仅变化一次。改事件驱动：首次标签变化后稳定 0.5s 即判定；
-        # 无任何变化（单档/全在售页）保留 1.2s 驻留兑底后照常 dump。
-        last_tag, changed_at = None, time.monotonic()
-        sku_entered_at = time.monotonic()
-        tag_changes = []
-        settled = False
-        while time.monotonic() < sku_entered_at + 5.0:
-            c = d(text="缺货登记").count
-            now = time.monotonic()
-            if c != last_tag:
-                last_tag, changed_at = c, now
-                tag_changes.append((round((now - sku_entered_at) * 1000), c))
-            elif last_tag and now - changed_at >= 0.5:
-                settled = True   # 有标签且已稳定：标签同帧渲染，0.5s 足以覆盖同帧内晚到者
-                break
-            elif not last_tag and now - sku_entered_at >= 1.2:
-                settled = True   # 无标签兑底：可能是单档/全在售，交 dump 与候选≠1 拦截
-                break
-            time.sleep(0.05)
-        root, rep = r.snap("s2_tiers")
-        r.log(
-            f"s2: 标签时间线(ms,count)={tag_changes}，"
-            f"稳定等待={round((time.monotonic() - sku_entered_at) * 1000)}ms"
-        )
-        if not rep["state"].startswith("sku"):
-            r.log(f"STOP: 标签稳定时状态异常（state={rep['state']}）")
-            return 1
-        if not settled:
-            r.log(f"STOP: 票档标签计数未稳定（5s 内 last={last_tag}）")
-            return 1
-        all_tiers, cands = tier_candidates(root)
-        if len(cands) != 1:
-            r.log(f"STOP: 在售票档候选 {len(cands)}/{len(all_tiers)} ≠ 1（保守规则不盲选）")
-            return 1
-        r.log(f"s2: 票档共 {len(all_tiers)}，缺货标记 {last_tag}，在售候选 1（标签稳定）")
-        r.tap(cands[0], "在售票档")
-        # 稳定版确定按钮：bounds 来自刚拿的 dump，仅截图像素轮询（~146ms/轮）
-        confirm_bounds = rep["cta"]["container_bounds"]
+        r.log("s1: 进入 SKU 页（入口快查询确认）")
 
-        def _confirm_bright():
-            res = probe.pixel_check_cta(d.screenshot(), confirm_bounds) or {}
-            return res.get("likely_active") is True
-
-        if not r.fast_poll(_confirm_bright, "s2_confirmpix", timeout=3.0):
-            r.log("STOP: 确定按钮未亮橙（仅截图轮询超时）")
+    # ---- Phase 3+4：SKU 双坐标（单 dump）→ shell 批量连点 ----
+    if not entered_order:
+        root, rep = r.snap("s2_sku")
+        price_xy, buy_xy = r.sku_coords(root)
+        if price_xy is None:
+            # 上游 price_selector：卡片可能未加载完，0.3s 后重 dump 一次
+            time.sleep(0.3)
+            root, rep = r.snap("s2_sku_retry")
+            price_xy, buy_xy = r.sku_coords(root)
+        if price_xy is None or buy_xy is None:
+            r.log(f"STOP: SKU 坐标缺失（price_index={r.price_index}，"
+                  f"price={price_xy}, buy={buy_xy}）——票档序号可能超出实际票卡数")
             return 1
-        allow, note = cta_text_guard(root, confirm_bounds)
-        if not allow:
-            r.log(f"STOP: 确定按钮文案护栏拦截（{note}）")
+        r.log(f"s2: 票价 {price_xy}，确定按钮 {buy_xy}（单 dump 双坐标）")
+        confirmed = r.shell_price_and_buy_until_confirm(price_xy, buy_xy)
+        path = "shell批量连点"
+        if not confirmed:
+            r.log("s2: shell 路未确认，元素点击回退")
+            if r.element_click_price() and r.element_click_buy():
+                poll_end = time.monotonic() + 0.55   # 上游 _wait_for_confirm_ready
+                while time.monotonic() < poll_end:
+                    if confirm_page_ready_u2(d):
+                        confirmed = True
+                        break
+                    time.sleep(0.02)
+            path = "元素点击回退"
+        if not confirmed:
+            r.log("STOP: 确认页未出现（连点+元素回退均超时）——可能票档不可选/弹窗拦截")
             return 1
-        r.tap(confirm_bounds, "SKU 确定按钮")
-    # 订单页字段就绪：u2 文本选择器轮询（~50ms/轮，无 dump；上游 rush 的
-    # 单选择器哲学），就绪后单次 snap 既取证又跑完整核对——字段未就绪时
-    # 不烧 dump 轮询
-    def _order_fields_ready_u2():
-        return (
-            d(textMatches=r"×\d+张").exists
-            and d(textMatches=r"¥\s*[\d,.]+").exists
-            and d(text="立即提交").exists
-        )
+        r.log(f"s2: 到达订单确认页（{path}）")
 
-    if not r.fast_poll(_order_fields_ready_u2, "s2_orderpoll", timeout=3.0):
-        r.log("STOP: 确定后订单页字段未出现（未跳转或页面结构变化）")
-        return 1
+    # ---- Phase 5：观演人 checkbox 补选（上游 _finish_confirm）→ 全字段核对 ----
     root, rep = r.snap("s2_after")
     if rep["state"] != "order_confirm_page":
-        r.log(f"STOP: 确定后状态异常（state={rep['state']}）")
+        r.log(f"STOP: 确认后状态异常（state={rep['state']}）")
         return 1
-    r.log("s2: 到达订单确认页")
-
-    # ---- 3) 等订单字段渲染 → 全字段核对（不提交时到此为止）----
-    # 正式提交仍做第二次快照，以较新的页面内容进行订单核对；
-    # 无提交演练可复用字段齐全的首帧，减少一次完整 dump。
+    n_box, checked, shell_fb = r.finish_attendees()
+    r.log(f"s3: 观演人 checkbox {checked}/{n_box} 已勾选"
+          + (f"（元素点击失效 {shell_fb} 个→shell 兜底）" if shell_fb else ""))
     if args.submit or not order_fields_ready(rep):
         root, rep = r.wait_until(
             lambda rt, p: order_fields_ready(p),
@@ -491,9 +531,12 @@ def main() -> int:
         "amount_match": amount == r.expected,
         "attendees_in_page": len(page_names),
         "attendees_match": bool(users) and all(page_names.count(u) == 1 for u in users),
+        "attendees_checked": checked,
+        "attendees_checked_match": (not users) or checked >= len(users),
     }
     ok = all((checks["submit_button_visible"], checks["quantity"] == "×1张",
-              checks["amount_match"], checks["attendees_match"]))
+              checks["amount_match"], checks["attendees_match"],
+              checks["attendees_checked_match"]))
     r.log("s3: 订单核对 " + json.dumps(checks, ensure_ascii=False))
     if not ok:
         r.snap("s3_final")
