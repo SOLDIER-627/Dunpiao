@@ -17,6 +17,8 @@
 保留的本仓库设施（上游方法之外的审计/合规层，不参与点击决策）：
   - 提交闸门体系：--submit 单次授权、submit_record.json、--clear-record、收银台即停
   - --wait-open：clock_sync 开售等待 + prewarm（上游 sale_waiter 骨架，E2E-07 成果）
+  - 坐标缓存（E2E-13）：logs/coords_cache.json 跨次复用 CTA/票价/确定按钮坐标；
+    --capture-coords 预约态预填；缓存只存坐标不存决策，点错自愈=重测一次
   - 文案护栏 cta_text_guard（上游 buy_button_guard 子集；挂在 Phase1 已有 dump 上零成本）
   - 证据落盘 logs/e2e_<ts>/（每阶段 XML + run.log）；订单全字段核对（金额/张数/观演人）
   - s0 自恢复 BACK 阶梯（上游 _recover_to_navigation_start 子集）
@@ -50,6 +52,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.dunpiao import probe  # noqa: E402
 from src.dunpiao import clock_sync  # noqa: E402
+from src.dunpiao import coords_cache  # noqa: E402
 
 POLL_PAGE = 0.2   # 页面态轮询间隔（上游 wait_for_page_state 默认）
 POLL_FAST = 0.05  # 就绪检查轮询间隔（上游 poll_until 默认）
@@ -106,6 +109,12 @@ def center(b):
 
 def on_screen(b, w, h):
     return 0 <= b[0] < b[2] <= w and 0 <= b[1] < b[3] <= h
+
+
+def point_on_screen(p, w, h):
+    return (isinstance(p, (list, tuple)) and len(p) == 2
+            and isinstance(p[0], int) and isinstance(p[1], int)
+            and 0 <= p[0] <= w and 0 <= p[1] <= h)
 
 
 def shell_taps(d, coords):
@@ -218,10 +227,15 @@ class Runner:
         return price_xy, buy_xy
 
     # ---- Phase 4：shell 批量连点直到确认页（上游 ≤0.9s 循环）----
+    # 注：上游原版是 [票价, 确定, 确定] 三连点；本实现改为 [票价, 确定]
+    # 两点——尾部确定点击在订单页已打开且触摸就绪时会落在「立即提交」
+    # 同位 bar 上（btn_buy_view 与订单提交按钮同位），有绕过提交闸门
+    # 的风险；灰按钮竞态由循环重试覆盖。这也是上游 formal 模式禁用本
+    # 路径的原因之一，故不盲点第三下。
     def shell_price_and_buy_until_confirm(self, price_xy, buy_xy) -> bool:
         shell_end = time.monotonic() + 0.9
         while time.monotonic() < shell_end:
-            shell_taps(self.d, [price_xy, buy_xy, buy_xy])
+            shell_taps(self.d, [price_xy, buy_xy])
             poll_end = min(shell_end, time.monotonic() + 0.9)
             while time.monotonic() < poll_end:
                 if confirm_page_ready_u2(self.d):
@@ -319,7 +333,20 @@ def main() -> int:
         "--rush", action="store_true",
         help="（已废弃）上游 rush 方法已成默认行为；保留参数仅为兼容旧命令",
     )
+    ap.add_argument(
+        "--cache-key", default=None,
+        help="坐标缓存键（默认用 --show-tag；换场次/换机需重测）",
+    )
+    ap.add_argument(
+        "--no-cache", action="store_true",
+        help="本次不读坐标缓存（仍会写回）",
+    )
+    ap.add_argument(
+        "--capture-coords", action="store_true",
+        help="测量模式：走到 SKU 页取坐标写缓存即停（预约态预填用，不连点不进单）",
+    )
     args = ap.parse_args()
+    args.cache_key = args.cache_key or args.show_tag
 
     out = ROOT / "logs" / f"e2e_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -352,23 +379,40 @@ def main() -> int:
           f"expected_total={args.expected_total}，price_index={r.price_index}，"
           f"上游 fast_pipeline 方法）===")
 
-    # ---- 0) 自恢复到详情页（BACK 后 deadline 轮询，不点任何业务按钮）----
-    root, rep = r.snap("s0_check")
-    for i in range(4):
-        if rep["state"] == "detail_page":
-            break
-        if rep["state"].startswith("sku") or rep["state"] == "order_confirm_page":
-            r.log(f"s0: 当前 {rep['state']}，BACK 返回详情页")
-            d.shell("input keyevent 4")
-            root, rep = r.wait_until(
-                lambda rt, p: p["state"] == "detail_page",
-                f"s0_back_{i}", timeout=3.0, poll_interval=POLL_PAGE,
-            )
-        else:
-            break
-    if rep.get("state") != "detail_page":
-        r.log(f"STOP: 不在详情页（state={rep.get('state')}）——请手动打开目标演出详情页后重跑")
-        return 1
+    # ---- 0) 自恢复到详情页（缓存命中时 activity 快查即可，跳过 dump）----
+    cache = None if args.no_cache else coords_cache.load(ROOT, args.cache_key)
+    cache_ok = bool(
+        cache
+        and cache.get("screen") == [r.w, r.h]
+        and cache.get("price_index") == r.price_index
+        and all(point_on_screen(cache.get(k), r.w, r.h)
+                for k in ("cta_xy", "price_xy", "buy_xy"))
+    )
+    if cache and not cache_ok:
+        r.log("s0: 坐标缓存校验未过（屏尺寸/price_index/坐标屏内）——走 dump 路径")
+    if cache_ok and "ProjectDetailActivity" in d.app_current().get("activity", ""):
+        r.log("s0: 详情页（activity 快查）+ 缓存校验通过，跳过 dump")
+    else:
+        cache_ok = False
+        root, rep = r.snap("s0_check")
+        for i in range(4):
+            if rep["state"] == "detail_page":
+                break
+            if rep["state"].startswith("sku") or rep["state"] == "order_confirm_page":
+                r.log(f"s0: 当前 {rep['state']}，BACK 返回详情页")
+                d.shell("input keyevent 4")
+                root, rep = r.wait_until(
+                    lambda rt, p: p["state"] == "detail_page",
+                    f"s0_back_{i}", timeout=3.0, poll_interval=POLL_PAGE,
+                )
+            else:
+                break
+        if rep.get("state") != "detail_page":
+            r.log(f"STOP: 不在详情页（state={rep.get('state')}）——请手动打开目标演出详情页后重跑")
+            return 1
+        # 恢复到详情页后，缓存校验依然成立（屏尺寸/price_index/坐标已验过）
+        if cache:
+            cache_ok = True
 
     # ---- 0.5) 开售等待模式（上游 wait_for_sale_start 骨架：clock_sync + lead 轮询）----
     prewarm_ok = False
@@ -431,16 +475,29 @@ def main() -> int:
             prewarm_ok = False
             r.log("wait-open: T0 前 activity 变化，放弃直点走验证路径")
 
-    # ---- Phase 1+2：CTA 点击（T0 直点优先，否则单 dump 坐标）+ 入口等待 ----
+    # ---- Phase 1+2：CTA 点击（prewarm T0 直点 > 缓存坐标 > 单 dump）+ 入口等待 ----
     entered_order = False
     entry = None
+    fresh_cta = None
     if args.wait_open and prewarm_ok:
         cta_b = rep["cta"]["container_bounds"]
         r.tap(cta_b, "详情页购票 CTA（prewarm T0 直点）")
+        fresh_cta = center(cta_b)
         entry = r.wait_for_purchase_entry(3.0)
         if entry is None:
             r.log("wait-open: T0 直点未进页，回退 Phase1 验证路径")
-    if not (args.wait_open and prewarm_ok and entry is not None):
+    elif cache_ok:
+        xy = tuple(cache["cta_xy"])
+        r.log(f"s1: 缓存 CTA 坐标 {xy} 直点（跳过 dump；入口轮询+订单核对兑底）")
+        shell_taps(d, [xy])
+        entry = r.wait_for_purchase_entry(0.45)
+        if entry is None:
+            r.log("s1: 缓存坐标未进页，双击重试（上游 _open_purchase_panel）")
+            shell_taps(d, [xy, xy])
+            entry = r.wait_for_purchase_entry(0.45)
+        if entry is None:
+            r.log("s1: 缓存坐标未进页，回退 dump 路径")
+    if entry is None:
         # 上游 rush_preselect_and_buy_via_xml：单 dump → CTA 坐标 → shell 点击
         root, rep = r.snap("s1_detail")
         cta_b = rep["cta"].get("container_bounds")
@@ -454,6 +511,7 @@ def main() -> int:
         if note and note != "no_text":
             r.log(f"s1: CTA 文案护栏通过（{note}）")
         r.tap(cta_b, "详情页购票 CTA")
+        fresh_cta = center(cta_b)
         entry = r.wait_for_purchase_entry(0.45)
         if entry is None:
             # 上游 _open_purchase_panel 回退：shell 双击再等一次
@@ -469,22 +527,54 @@ def main() -> int:
     else:
         r.log("s1: 进入 SKU 页（入口快查询确认）")
 
-    # ---- Phase 3+4：SKU 双坐标（单 dump）→ shell 批量连点 ----
+    # ---- Phase 3+4：坐标（缓存 > 单 dump）→ shell 批量连点（含自愈重测）----
+    if args.capture_coords and entered_order:
+        r.log("RESULT: 直达订单确认页，SKU 坐标无需测量，未写缓存")
+        return 0
     if not entered_order:
-        root, rep = r.snap("s2_sku")
-        price_xy, buy_xy = r.sku_coords(root)
+        price_xy = buy_xy = None
+        if cache_ok and entry == "sku_page":
+            price_xy, buy_xy = tuple(cache["price_xy"]), tuple(cache["buy_xy"])
+            r.log(f"s2: 缓存坐标 票价{price_xy} 确定{buy_xy}（跳过 SKU dump）")
+            # 实测（2026-11-18）：入口确认后 ~1ms 连点被页面吞掉（3/4 失败），
+            # dump 路径天然时延 0.35-1.2s 从未失败；补 0.4s 驻留落到已验证时延区
+            time.sleep(0.4)
         if price_xy is None:
-            # 上游 price_selector：卡片可能未加载完，0.3s 后重 dump 一次
-            time.sleep(0.3)
-            root, rep = r.snap("s2_sku_retry")
+            root, rep = r.snap("s2_sku")
             price_xy, buy_xy = r.sku_coords(root)
-        if price_xy is None or buy_xy is None:
-            r.log(f"STOP: SKU 坐标缺失（price_index={r.price_index}，"
-                  f"price={price_xy}, buy={buy_xy}）——票档序号可能超出实际票卡数")
-            return 1
-        r.log(f"s2: 票价 {price_xy}，确定按钮 {buy_xy}（单 dump 双坐标）")
+            if price_xy is None:
+                # 上游 price_selector：卡片可能未加载完，0.3s 后重 dump 一次
+                time.sleep(0.3)
+                root, rep = r.snap("s2_sku_retry")
+                price_xy, buy_xy = r.sku_coords(root)
+            if price_xy is None or buy_xy is None:
+                r.log(f"STOP: SKU 坐标缺失（price_index={r.price_index}，"
+                      f"price={price_xy}, buy={buy_xy}）——票档序号可能超出实际票卡数")
+                return 1
+            r.log(f"s2: 票价 {price_xy}，确定按钮 {buy_xy}（单 dump 双坐标）")
+        if args.capture_coords:
+            coords_cache.save(ROOT, args.cache_key, {
+                "cta_xy": list(fresh_cta or cache["cta_xy"]),
+                "price_xy": list(price_xy), "buy_xy": list(buy_xy),
+                "screen": [r.w, r.h], "price_index": r.price_index,
+            })
+            r.log(f"RESULT: ✅ 坐标已缓存（key={args.cache_key}）——测量模式到此为止，"
+                  "未连点未进单")
+            return 0
         confirmed = r.shell_price_and_buy_until_confirm(price_xy, buy_xy)
         path = "shell批量连点"
+        if not confirmed and cache_ok and list(price_xy) == cache["price_xy"]:
+            # 自愈：入口即连点可能被页面吞掉（实测 ~1/3 概率）——重测坐标；
+            # 坐标没变也再连点一轮：此时距入口 ~1.5s，是 dump 路径屡试
+            # 不爽的时延区；仍失败才走元素回退
+            r.log("s2: 缓存坐标未确认，重测后再连点一轮")
+            root, rep = r.snap("s2_remeasure")
+            p2, b2 = r.sku_coords(root)
+            if p2 and b2:
+                price_xy, buy_xy = p2, b2
+                if r.shell_price_and_buy_until_confirm(price_xy, buy_xy):
+                    confirmed = True
+                    path = "shell连点（重测后）"
         if not confirmed:
             r.log("s2: shell 路未确认，元素点击回退")
             if r.element_click_price() and r.element_click_buy():
@@ -494,21 +584,38 @@ def main() -> int:
                         confirmed = True
                         break
                     time.sleep(0.02)
-            path = "元素点击回退"
+            if path == "shell批量连点":
+                path = "元素点击回退"
         if not confirmed:
-            r.log("STOP: 确认页未出现（连点+元素回退均超时）——可能票档不可选/弹窗拦截")
+            r.log("STOP: 确认页未出现（连点+重测+元素回退均超时）——可能票档不可选/弹窗拦截")
             return 1
         r.log(f"s2: 到达订单确认页（{path}）")
+        # 到单成功 → 刷新缓存（本次实际生效的坐标）
+        coords_cache.save(ROOT, args.cache_key, {
+            "cta_xy": list(fresh_cta or cache["cta_xy"]),
+            "price_xy": list(price_xy), "buy_xy": list(buy_xy),
+            "screen": [r.w, r.h], "price_index": r.price_index,
+        })
+        r.log("s2: 坐标缓存已刷新")
 
     # ---- Phase 5：观演人 checkbox 补选（上游 _finish_confirm）→ 全字段核对 ----
     root, rep = r.snap("s2_after")
     if rep["state"] != "order_confirm_page":
         r.log(f"STOP: 确认后状态异常（state={rep['state']}）")
         return 1
-    n_box, checked, shell_fb = r.finish_attendees()
-    r.log(f"s3: 观演人 checkbox {checked}/{n_box} 已勾选"
-          + (f"（元素点击失效 {shell_fb} 个→shell 兜底）" if shell_fb else ""))
-    if args.submit or not order_fields_ready(rep):
+    # checkbox 状态直读已有快照：全勾则跳过 u2 逐个 .info（实测省 ~0.8s）
+    cb_states = [n.get("checked") == "true" for n in root.iter("node")
+                 if (n.get("resource-id") or "") == CHECKBOX]
+    if cb_states and all(cb_states):
+        n_box = checked = len(cb_states)
+        shell_fb = 0
+        r.log(f"s3: 观演人 checkbox {checked}/{n_box} 已勾选（XML 直读）")
+    else:
+        n_box, checked, shell_fb = r.finish_attendees()
+        r.log(f"s3: 观演人 checkbox {checked}/{n_box} 已勾选"
+              + (f"（元素点击失效 {shell_fb} 个→shell 兜底）" if shell_fb else ""))
+    # 首帧字段已齐则复用 s2_after 快照核对，免重复 dump
+    if not order_fields_ready(rep):
         root, rep = r.wait_until(
             lambda rt, p: order_fields_ready(p),
             "s3_load", timeout=3.0, poll_interval=POLL_FAST,
