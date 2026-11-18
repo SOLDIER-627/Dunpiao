@@ -142,9 +142,10 @@ def analyze(root: ET.Element, package: str, activity: str | None = None) -> dict
         report["state"] = "login_blocked"
         return report
 
-    # 订单确认页识别：活动名（DmOrderActivity）或结构性标记。
-    # 与详情/SKU 页不同：提交按钮"立即提交"在此页完全可见可点击（本机实证）。
-    is_order = bool(activity and "order" in activity.lower()) or bool(
+    # 订单确认页识别：类名（DmOrderActivity）或结构性标记。
+    # 注意：详情页 activity 路径含 newtradeorder，不能裸匹配 "order" [L 实训踩坑]。
+    cls = (activity or "").rsplit(".", 1)[-1].lower()
+    is_order = cls.startswith("dmorder") or bool(
         _text_marker_present(root, ("确认购买", "实名观演人"))
     )
     if is_order:
