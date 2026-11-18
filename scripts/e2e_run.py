@@ -328,7 +328,9 @@ def main() -> int:
         else:
             sig_state["last"], sig_state["hits"] = sig, 1
         sig_state["i"] += 1
-        return sig_state["hits"] >= 3 and sig_state["i"] >= 3 and bool(avail)
+        # 实测：签名连续 2 轮不变已覆盖标签晚渲染窗口（3 轮多花 ~0.6s，
+        # 且上游 rush 模式同为先快后验证哲学）
+        return sig_state["hits"] >= 2 and sig_state["i"] >= 2 and bool(avail)
 
     root, rep = r.wait_until(
         _tiers_stable, "s2_loadtiers", timeout=4.0, poll_interval=POLL_FAST,
@@ -342,13 +344,7 @@ def main() -> int:
         return 1
     r.log(f"s2: 票档共 {len(all_tiers)}，在售候选 1（签名稳定 {sig_state['hits']} 轮）")
     r.tap(cands[0], "在售票档")
-    root, rep = r.wait_until(
-        lambda rt, p: p["state"] == "sku_page", "s2_selected",
-        timeout=1.5, poll_interval=POLL_FAST,
-    )
-    if root is None:
-        r.log(f"STOP: 选档后状态异常（{rep['state']}）")
-        return 1
+    # 不再中间检查“仍在 SKU 页”：下一步确定按钮像素检查本身兼作状态验证
     # 两步制：确定按钮亮橙才点（决策点，像素验证）
     root, rep = r.wait_until(
         lambda rt, p: p["cta"].get("likely_active") is True,
@@ -401,11 +397,12 @@ def main() -> int:
     ok = all((checks["submit_button_visible"], checks["quantity"] == "×1张",
               checks["amount_match"], checks["attendees_match"]))
     r.log("s3: 订单核对 " + json.dumps(checks, ensure_ascii=False))
-    r.snap("s3_final")
     if not ok:
+        r.snap("s3_final")
         r.log("RESULT: ❌ 到达订单页但核对未全通过——停机，交人工检查")
         return 1
     if not args.submit:
+        r.snap("s3_final")
         r.log("RESULT: ✅ 端到端（无提交）通过——已到订单页且全字段核对一致，停在提交前")
         return 0
 
