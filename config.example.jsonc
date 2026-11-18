@@ -1,0 +1,32 @@
+{
+  // dunpiao 配置模板
+  // 用法：复制为 config.local.jsonc 后填写；该文件已被 .gitignore 排除，切勿提交。
+  // 观演人等个人信息只保存在本地文件里。
+
+  // 设备（单台可留 null，多台时填 adb devices 里的序列号）
+  "serial": null,
+
+  // 目标演出
+  "keyword": "",            // 大麦 App 内搜索关键词（档案用）
+  "target_title": "",       // 演出标题（档案用，人工核对）
+  "target_venue": "",       // 场馆（档案用）
+  "city": "上海",           // 城市（场次匹配时用）
+
+  // 场次与票档
+  "date": "",               // 场次日期子串，如 "11.21" 或 "11月21日 周六"
+  "session_index": 1,       // 场次序号（0 起，面板从上到下）；两级面板必填
+  "price": "",              // 目标票价数字，如 "488"（票档文本匹配用）
+  "price_index": 0,         // 票档序号（0 起，面板从上到下）
+
+  // 观演人（敏感：必须是 App 内已配置好的姓名；脚本只勾选，不新增）
+  "users": [],
+
+  // 开售等待
+  "sell_start_time": null,  // 也可用命令行 --wait-open 传入
+  "countdown_lead_ms": 3000,
+
+  // 运行开关（当前版本以命令行参数为准，这里仅作记录）
+  "probe_only": true,
+  "if_commit_order": false,
+  "auto_navigate": false
+}

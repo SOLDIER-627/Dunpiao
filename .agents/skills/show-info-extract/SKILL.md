@@ -19,7 +19,7 @@ description: 从大麦 App 当前页面提取演出基本信息（标题/场馆/
 
 ```bash
 # 1) 当前页面直接提取
-.venv/bin/python scripts/show_info.py --serial a0033f8b --save-xml pagesamples/showinfo_<标签>.xml
+.venv/bin/python scripts/show_info.py --serial <serial> --save-xml pagesamples/showinfo_<标签>.xml
 ```
 
 输出 = 人读摘要 + JSON 块。解读要点：
@@ -54,11 +54,11 @@ description: 从大麦 App 当前页面提取演出基本信息（标题/场馆/
 ```bash
 # CTA 容器坐标从上一步 JSON 的 cta.container_bounds 取中心，shell tap 进入面板
 # （必须用 show_info 提取的 bounds，不要凭记忆点）
-.android-sdk/platform-tools/adb -s a0033f8b shell input tap <cx> <cy>
+.android-sdk/platform-tools/adb -s <serial> shell input tap <cx> <cy>
 sleep 1.5
-.venv/bin/python scripts/show_info.py --serial a0033f8b --save-xml pagesamples/showinfo_<标签>_sku.xml
+.venv/bin/python scripts/show_info.py --serial <serial> --save-xml pagesamples/showinfo_<标签>_sku.xml
 # 提取完立刻返回详情页（面板上不点确定）
-.android-sdk/platform-tools/adb -s a0033f8b shell input keyevent 4
+.android-sdk/platform-tools/adb -s <serial> shell input keyevent 4
 ```
 
 红线：SKU 面板里**只 dump，不点确定/不点票档**（点票档会改变预选状态）。

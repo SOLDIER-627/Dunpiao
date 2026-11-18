@@ -46,7 +46,7 @@
 ### 5. 配置文件
 
 ```bash
-cp config.example.yaml config.local.jsonc   # 首次
+cp config.example.jsonc config.local.jsonc   # 首次
 ```
 
 `config.local.jsonc` 已 gitignored，**不入库、不进对话**。里面至少要填对

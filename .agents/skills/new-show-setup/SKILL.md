@@ -15,7 +15,7 @@ description: Configure dunpiao for a new Damai show (新演出预检). Use when 
 要求用户把手机停在大麦 App 目标演出的**详情页**，然后运行：
 
 ```bash
-cd /Users/Admin/Desktop/work/Ticket
+# 在项目根目录执行
 .venv/bin/python -m src.dunpiao.show_wizard capture
 ```
 
@@ -56,7 +56,7 @@ cd /Users/Admin/Desktop/work/Ticket
 - apply 只覆盖白名单字段（keyword/date/price/price_index/target_title/target_venue），
   **永不触碰 users（观演人）等敏感字段**；找不到键会拒绝而非静默新增。
 
-## 预约态预检的局限（E2E-15 实战教训，必读）
+## 预约态预检的局限（真机实测教训，必读）
 
 预约（未开售）状态下 capture/测坐标有硬局限，向用户逐项说明：
 
