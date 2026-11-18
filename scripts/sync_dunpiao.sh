@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 
 rsync -a --delete \
   --exclude '.git' \
+  --exclude 'Dunpiao' \
   --exclude '.venv' \
   --exclude '.android-sdk' \
   --exclude '.android-avd' \
