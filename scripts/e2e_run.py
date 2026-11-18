@@ -80,13 +80,19 @@ def main() -> int:
     ap.add_argument("--expected-total", default="780.00")
     ap.add_argument("--max-state-wait", type=float, default=15.0)
     ap.add_argument("--submit", action="store_true", help="单次授权真实提交（默认关闭）")
+    ap.add_argument("--show-tag", default="libenben_780_20261128", help="提交闸门记录的演出标识")
+    ap.add_argument(
+        "--force-override-once",
+        action="store_true",
+        help="同演出已有提交记录时覆盖一次（需人工确认历史订单已取消/未付款）",
+    )
     args = ap.parse_args()
 
     import uiautomator2 as u2
     d = u2.connect(args.serial)
     out = ROOT / "logs" / f"e2e_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     r = Runner(d, out, args.expected_total, args.max_state_wait)
-    r.log(f"=== E2E 运行开始（无提交版，expected_total={args.expected_total}）===")
+    r.log(f"=== E2E 运行开始（submit={'ON' if args.submit else 'OFF'}，expected_total={args.expected_total}）===")
 
     # ---- 0) 自恢复到详情页（BACK 有界回退，不点任何业务按钮）----
     root, rep = r.snap("s0_check")
@@ -205,14 +211,59 @@ def main() -> int:
     )
     r.log("s3: 订单核对 " + json.dumps(checks, ensure_ascii=False))
     r.snap("s3_final")
-    if ok:
-        r.log("RESULT: ✅ 端到端（无提交）通过——已到订单页且全字段核对一致，停在提交前")
-    else:
+    if not ok:
         r.log("RESULT: ❌ 到达订单页但核对未全通过——停机，交人工检查")
         return 1
-    if args.submit:
-        r.log("STOP: --submit 需单次授权流程，本运行器未实现自动提交（见 E2E-05）")
-    return 0
+    if not args.submit:
+        r.log("RESULT: ✅ 端到端（无提交）通过——已到订单页且全字段核对一致，停在提交前")
+        return 0
+
+    # ---- 4) 单次提交闸门（E2E-05）：先记录后点击，同演出不盲重试 ----
+    gate = ROOT / "logs" / "submit_record.json"
+    records = json.loads(gate.read_text(encoding="utf-8")) if gate.exists() else []
+    prior = [x for x in records if x.get("show_tag") == args.show_tag]
+    if prior and not args.force_override_once:
+        r.log(f"STOP: 演出 {args.show_tag} 已有提交记录（{prior[-1]['time']}，status={prior[-1].get('status')}）；"
+              "确认历史订单已取消/未付款后可用 --force-override-once 覆盖一次")
+        return 1
+    records = [x for x in records if x.get("show_tag") != args.show_tag]
+    records.append({
+        "time": datetime.datetime.now().isoformat(timespec="seconds"),
+        "show_tag": args.show_tag,
+        "status": "submitted_intent",
+        "amount": str(amount),
+        "evidence": out.name,
+    })
+    gate.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+    r.log("s4: 【单次授权】点击『立即提交』——此后不盲重试，到收银台即停")
+    r.tap(order["submit_button"]["bounds"], "立即提交")
+
+    # ---- 5) 到收银台/待支付即停，支付交用户 ----
+    cashier = False
+    for i in range(8):
+        time.sleep(1.5)
+        xml = r.d.dump_hierarchy()
+        (r.out / f"s5_after_submit_{i}.xml").write_text(xml, encoding="utf-8")
+        r.d.screenshot(str(r.out / f"s5_after_submit_{i}.png"))
+        root5 = ET.fromstring(xml)
+        act = r.d.app_current().get("activity", "")
+        texts = {
+            (n.get("text") or "").strip() or (n.get("content-desc") or "").strip()
+            for n in root5.iter("node")
+        }
+        if "MspContainerActivity" in act or any("支付金额" in t for t in texts):
+            cashier = True
+            break
+        if any(k in t for t in texts for k in ("滑块", "安全验证", "验证码")):
+            r.log(f"STOP: 出现验证拦截（activity={act.split('.')[-1]}）——红线，交人工")
+            return 1
+    if cashier:
+        r.log(f"RESULT: ✅ 提交成功到达收银台（activity={act.split('.')[-1]}）——待用户支付，流程终止")
+        records[-1]["status"] = "awaiting_user_payment"
+        gate.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+        return 0
+    r.log(f"STOP: 提交后未检测到收银台（activity={act.split('.')[-1]}）——不盲重试，交人工")
+    return 1
 
 
 if __name__ == "__main__":
