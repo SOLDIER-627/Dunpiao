@@ -18,6 +18,32 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
+# Page samples collected during app exploration
+pagesamples/
+
 # Project-local Android SDK and virtual devices
 .android-sdk/
 .android-avd/
+
+# GitHub archive repo (nested, managed separately)
+Dunpiao/
+
+# Pinned third-party source checkout; provenance is recorded in docs
+.upstream/
+.pi-sessions/
+
+# Full local project snapshots can include ignored diagnostics and Git history
+archive/snapshots/
+
+# 上游参考 checkout（只读，不入库）
+reference/
+
+# 上游 HaTickets 运行配置（含设备序列号，不入库）
+config.jsonc
+mobile/config.jsonc
+reference/HaTickets/mobile/config.jsonc
+
+# macOS 大小写不敏感文件系统误伤：Dunpiao/ 规则会匹配到小写 src/dunpiao，显式豁免
+!src/dunpiao/
+!src/dunpiao/**
+src/dunpiao/__pycache__/

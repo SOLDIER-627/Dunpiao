@@ -195,6 +195,12 @@ def main() -> int:
         "--ignore-clock-trust", action="store_true",
         help="时钟信任为 severe 时仍然继续（默认拒绝，上游语义为降级/拒绝）",
     )
+    ap.add_argument(
+        "--rush", action="store_true",
+        help="快速模式：跳过缺货标签判定与稳定窗口，按 config 的 price_index 直点目标票档"
+             "（确定按钮像素+文案闸门兜底）。仅用于已用向导确认过票档序号的演出；"
+             "错选代价=闸门拦停一次尝试（可 BACK 重试），不是下错单",
+    )
     args = ap.parse_args()
 
     out = ROOT / "logs" / f"e2e_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -215,6 +221,7 @@ def main() -> int:
 
     import uiautomator2 as u2
     d = u2.connect(args.serial)
+    cfg = json.loads(re.sub(r"//[^\n]*", "", (ROOT / "config.local.jsonc").read_text("utf-8")))
     # 上游 orchestrator.py:922 —— 关闭 u2 内部等待，避免隐式阻塞
     d.settings["wait_timeout"] = 0
     d.settings["operation_delay"] = (0, 0)
@@ -341,63 +348,116 @@ def main() -> int:
         root = None  # 状态由 s2_tiers 的 dump 统一验证
     r.log("s1: 进入 SKU 页（快查询确认）")
 
-    # ---- 2) 票档标签计数稳定（快路径）→ 单次 dump 拿 bounds 与护栏 ----
-    # 实测根因：『缺货登记』标签晚于票档框渲染；u2 文本计数 ~48ms/轮，
-    # 计数在 ≥0.8s 窗口内不变且 SKU 驻留 ≥1.2s 才认定标签已定，然后 dump 一次。
-    # 实测（E2E-09 采样，2026-11-18）：热/冷启动标签均在 ~103/134ms 内全部出现
-    # 且仅变化一次。改事件驱动：首次标签变化后稳定 0.5s 即判定；
-    # 无任何变化（单档/全在售页）保留 1.2s 驻留兑底后照常 dump。
-    last_tag, changed_at = None, time.monotonic()
-    sku_entered_at = time.monotonic()
-    tag_changes = []
-    settled = False
-    while time.monotonic() < sku_entered_at + 5.0:
-        c = d(text="缺货登记").count
-        now = time.monotonic()
-        if c != last_tag:
-            last_tag, changed_at = c, now
-            tag_changes.append((round((now - sku_entered_at) * 1000), c))
-        elif last_tag and now - changed_at >= 0.5:
-            settled = True   # 有标签且已稳定：标签同帧渲染，0.5s 足以覆盖同帧内晚到者
-            break
-        elif not last_tag and now - sku_entered_at >= 1.2:
-            settled = True   # 无标签兑底：可能是单档/全在售，交 dump 与候选≠1 拦截
-            break
-        time.sleep(0.05)
-    root, rep = r.snap("s2_tiers")
-    r.log(
-        f"s2: 标签时间线(ms,count)={tag_changes}，"
-        f"稳定等待={round((time.monotonic() - sku_entered_at) * 1000)}ms"
-    )
-    if not rep["state"].startswith("sku"):
-        r.log(f"STOP: 标签稳定时状态异常（state={rep['state']}）")
+    # ---- 2) 票档定位与点击：rush 模式直点序号；默认走标签计数稳定（快路径）----
+    rush_idx = int(cfg["price_index"]) if args.rush and cfg.get("price_index") is not None else None
+    if args.rush and rush_idx is None:
+        r.log("STOP: --rush 需要 config.local.jsonc 里已确认的 price_index（用向导 capture 后 apply 写入）")
         return 1
-    if not settled:
-        r.log(f"STOP: 票档标签计数未稳定（5s 内 last={last_tag}）")
-        return 1
-    all_tiers, cands = tier_candidates(root)
-    if len(cands) != 1:
-        r.log(f"STOP: 在售票档候选 {len(cands)}/{len(all_tiers)} ≠ 1（保守规则不盲选）")
-        return 1
-    r.log(f"s2: 票档共 {len(all_tiers)}，缺货标记 {last_tag}，在售候选 1（标签稳定）")
-    r.tap(cands[0], "在售票档")
-    # 快路径：确定按钮亮橙用仅截图像素轮询（~146ms/轮），bounds 来自刚拿的 dump
-    confirm_bounds = rep["cta"]["container_bounds"]
-    def _confirm_bright():
-        res = probe.pixel_check_cta(d.screenshot(), confirm_bounds) or {}
-        return res.get("likely_active") is True
-    if not r.fast_poll(_confirm_bright, "s2_confirmpix", timeout=3.0):
-        r.log("STOP: 确定按钮未亮橙（仅截图轮询超时）")
-        return 1
-    allow, note = cta_text_guard(root, confirm_bounds)
-    if not allow:
-        r.log(f"STOP: 确定按钮文案护栏拦截（{note}）")
-        return 1
-    r.tap(confirm_bounds, "SKU 确定按钮")
-    # 快路径：订单页标记（上游 _wait_for_submit_ready 同款 checkbox ID）
-    chk = d(resourceId="cn.damai:id/checkbox")
-    if not r.fast_poll(lambda: chk.exists, "s2_orderpoll", timeout=3.0):
-        r.log("STOP: 确定后订单页标记未出现（未跳转或页面结构变化）")
+    if rush_idx is not None:
+        # rush（照上游 price_selector._click_price_option_by_config_index）：
+        # 不等标签稳定、不 dump，按确认过的 price_index 直点。child 必须
+        # 按 className+clickable 过滤后再取 index（实测无过滤时 index 语义
+        # 是“任意后代的首子”，坐标错位）。错选兑底=确定按钮像素闸门 +
+        # 订单金额核对（错选代价=一次失败尝试，不是下错单）
+        fl = d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
+        cards = fl.child(className="android.widget.FrameLayout", clickable=True)
+        screen_w, screen_h = d.window_size()
+
+        def _tier_ready():
+            # 不存在/超界时 .info 抛异常，fast_poll 异常重试；入场动画期间
+            # bounds 可能停在屏外中间态（实测 x=1903>屏宽，y 已就位），
+            # 仅当 bounds 落在屏内才认定就绪
+            bb = cards[rush_idx].info["bounds"]
+            return 0 <= bb["left"] < bb["right"] <= screen_w and 0 <= bb["top"] < bb["bottom"] <= screen_h
+
+        if not r.fast_poll(_tier_ready, "s2_rushtier", timeout=3.0):
+            r.log(f"STOP: rush 目标票档未渲染或 bounds 异常（index={rush_idx}）")
+            return 1
+        b = cards[rush_idx].info["bounds"]
+        r.tap([b["left"], b["top"], b["right"], b["bottom"]],
+              f"rush 直点目标票档 index={rush_idx}")
+        # rush 确定按钮：照上游 rush 哲学——bounds 屏内即直点，不查亮橙；
+        # 「确认就绪」判定=订单页字段出现（下一段 orderpoll）。置灰点击无
+        # 效果→orderpoll 超时 STOP；选错档→订单金额核对拦在提交前
+        btn = d(resourceId="cn.damai:id/btn_buy_view")
+        screen_w2, screen_h2 = d.window_size()
+
+        def _btn_ready():
+            bb = btn.info["bounds"]  # 不存在时抛异常，fast_poll 重试
+            return 0 <= bb["left"] < bb["right"] <= screen_w2 and 0 <= bb["top"] < bb["bottom"] <= screen_h2
+
+        if not r.fast_poll(_btn_ready, "s2_confirmbtn", timeout=2.0):
+            r.log("STOP: rush 未定位到确定按钮（btn_buy_view）")
+            return 1
+        bb = btn.info["bounds"]
+        r.tap([bb["left"], bb["top"], bb["right"], bb["bottom"]], "SKU 确定按钮")
+    else:
+        # 默认稳版：标签计数稳定（事件驱动）→ 单次 dump 拿 bounds 与护栏
+        # 实测根因：『缺货登记』标签晚于票档框渲染；u2 文本计数 ~48ms/轮。
+        # 实测（E2E-09 采样，2026-11-18）：热/冷启动标签均在 ~103/134ms 内全部出现
+        # 且仅变化一次。改事件驱动：首次标签变化后稳定 0.5s 即判定；
+        # 无任何变化（单档/全在售页）保留 1.2s 驻留兑底后照常 dump。
+        last_tag, changed_at = None, time.monotonic()
+        sku_entered_at = time.monotonic()
+        tag_changes = []
+        settled = False
+        while time.monotonic() < sku_entered_at + 5.0:
+            c = d(text="缺货登记").count
+            now = time.monotonic()
+            if c != last_tag:
+                last_tag, changed_at = c, now
+                tag_changes.append((round((now - sku_entered_at) * 1000), c))
+            elif last_tag and now - changed_at >= 0.5:
+                settled = True   # 有标签且已稳定：标签同帧渲染，0.5s 足以覆盖同帧内晚到者
+                break
+            elif not last_tag and now - sku_entered_at >= 1.2:
+                settled = True   # 无标签兑底：可能是单档/全在售，交 dump 与候选≠1 拦截
+                break
+            time.sleep(0.05)
+        root, rep = r.snap("s2_tiers")
+        r.log(
+            f"s2: 标签时间线(ms,count)={tag_changes}，"
+            f"稳定等待={round((time.monotonic() - sku_entered_at) * 1000)}ms"
+        )
+        if not rep["state"].startswith("sku"):
+            r.log(f"STOP: 标签稳定时状态异常（state={rep['state']}）")
+            return 1
+        if not settled:
+            r.log(f"STOP: 票档标签计数未稳定（5s 内 last={last_tag}）")
+            return 1
+        all_tiers, cands = tier_candidates(root)
+        if len(cands) != 1:
+            r.log(f"STOP: 在售票档候选 {len(cands)}/{len(all_tiers)} ≠ 1（保守规则不盲选）")
+            return 1
+        r.log(f"s2: 票档共 {len(all_tiers)}，缺货标记 {last_tag}，在售候选 1（标签稳定）")
+        r.tap(cands[0], "在售票档")
+        # 稳定版确定按钮：bounds 来自刚拿的 dump，仅截图像素轮询（~146ms/轮）
+        confirm_bounds = rep["cta"]["container_bounds"]
+
+        def _confirm_bright():
+            res = probe.pixel_check_cta(d.screenshot(), confirm_bounds) or {}
+            return res.get("likely_active") is True
+
+        if not r.fast_poll(_confirm_bright, "s2_confirmpix", timeout=3.0):
+            r.log("STOP: 确定按钮未亮橙（仅截图轮询超时）")
+            return 1
+        allow, note = cta_text_guard(root, confirm_bounds)
+        if not allow:
+            r.log(f"STOP: 确定按钮文案护栏拦截（{note}）")
+            return 1
+        r.tap(confirm_bounds, "SKU 确定按钮")
+    # 订单页字段就绪：u2 文本选择器轮询（~50ms/轮，无 dump；上游 rush 的
+    # 单选择器哲学），就绪后单次 snap 既取证又跑完整核对——字段未就绪时
+    # 不烧 dump 轮询
+    def _order_fields_ready_u2():
+        return (
+            d(textMatches=r"×\d+张").exists
+            and d(textMatches=r"¥\s*[\d,.]+").exists
+            and d(text="立即提交").exists
+        )
+
+    if not r.fast_poll(_order_fields_ready_u2, "s2_orderpoll", timeout=3.0):
+        r.log("STOP: 确定后订单页字段未出现（未跳转或页面结构变化）")
         return 1
     root, rep = r.snap("s2_after")
     if rep["state"] != "order_confirm_page":
@@ -419,7 +479,6 @@ def main() -> int:
     order = rep["order"]
     m = re.fullmatch(r"¥\s*([\d,]+(?:\.\d{1,2})?)", order.get("total_price_text") or "")
     amount = Decimal(m.group(1).replace(",", "")) if m else None
-    cfg = json.loads(re.sub(r"//[^\n]*", "", (ROOT / "config.local.jsonc").read_text("utf-8")))
     users = [u.strip() for u in (cfg.get("users") or []) if isinstance(u, str) and u.strip()]
     page_names = [
         (n.get("text") or "").strip()
