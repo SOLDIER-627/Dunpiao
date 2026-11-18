@@ -103,6 +103,22 @@ class Runner:
                 self.log("像素验证失败（不影响分类）")
         return root, rep
 
+    def fast_poll(self, fn, tag: str, timeout: float, poll: float = 0.05):
+        """u2 快查询轮询（实测 ~50ms/轮，不 dump 不截图）。
+
+        上游 rush_mode 同思路（单 ID 选择器 ~60ms/轮）；dump 只留给必须
+        读文本/标签的关键点。返回 True/False。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if fn():
+                    return True
+            except Exception as e:
+                self.log(f"{tag}: 快查询异常重试 {type(e).__name__}")
+            time.sleep(poll)
+        return False
+
     def wait_until(self, pred, tag: str, timeout: float, poll_interval: float,
                    pixel: bool = False):
         """上游 wait_for_page_state 模式：deadline 轮询，先查后睡，无固定 sleep。"""
@@ -283,15 +299,14 @@ def main() -> int:
 
     # ---- 1) CTA 点击：T0 直点（prewarm）优先，否则亮橙闸门 + 文案护栏 ----
     root = None
+    entered_fast = False
     if args.wait_open and prewarm_ok:
         r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA（prewarm T0 直点）")
-        root, rep = r.wait_until(
-            lambda rt, p: p["state"].startswith("sku"),
-            "s1_after_t0", timeout=3.0, poll_interval=POLL_FAST,
-        )
-        if root is not None:
-            r.log("s1: T0 直点进入 SKU 页")
-    if root is None:
+        flow = d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
+        if r.fast_poll(lambda: flow.exists, "s1_after_t0", timeout=3.0):
+            entered_fast = True
+            r.log("s1: T0 直点进入 SKU 页（快查询确认）")
+    if not entered_fast:
         root, rep = r.wait_until(
             lambda rt, p: p["cta"].get("likely_active") is True,
             "s1_waitcta",
@@ -308,62 +323,63 @@ def main() -> int:
         if note and note != "no_text":
             r.log(f"s1: CTA 文案护栏通过（{note}）")
         r.tap(rep["cta"]["container_bounds"], "详情页购票 CTA")
-        root, rep = r.wait_until(
-            lambda rt, p: p["state"].startswith("sku"),
-            "s1_after", timeout=2.0, poll_interval=POLL_FAST,
-        )
-        if root is None:
-            r.log(f"STOP: 点击 CTA 后未进 SKU 页（state={rep['state']}）")
+        # 快路径：票价容器出现即 SKU 页（u2 查询 ~50ms/轮 vs dump 轮 ~300ms/轮）
+        flow = d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
+        if not r.fast_poll(lambda: flow.exists, "s1_skupoll", timeout=2.5):
+            r.log("STOP: 点击 CTA 后票价容器未出现（未进 SKU 或页面结构变化）")
             return 1
-    r.log("s1: 进入 SKU 页")
+        root = None  # 状态由 s2_tiers 的 dump 统一验证
+    r.log("s1: 进入 SKU 页（快查询确认）")
 
-    # ---- 2) 等票档渲染且签名稳定（标签后于 bounds 渲染，连续 3 轮不变才判定）----
-    sig_state = {"last": None, "hits": 0, "i": 0}
-
-    def _tiers_stable(rt, p):
-        all_t, avail = tier_candidates(rt)
-        sig = (len(all_t), tuple(tuple(b) for b in avail))
-        if sig == sig_state["last"]:
-            sig_state["hits"] += 1
-        else:
-            sig_state["last"], sig_state["hits"] = sig, 1
-        sig_state["i"] += 1
-        # 实测：签名连续 2 轮不变已覆盖标签晚渲染窗口（3 轮多花 ~0.6s，
-        # 且上游 rush 模式同为先快后验证哲学）
-        return sig_state["hits"] >= 2 and sig_state["i"] >= 2 and bool(avail)
-
-    root, rep = r.wait_until(
-        _tiers_stable, "s2_loadtiers", timeout=4.0, poll_interval=POLL_FAST,
-    )
-    if root is None:
-        r.log("STOP: 票档列表未在有界时间内稳定加载")
+    # ---- 2) 票档标签计数稳定（快路径）→ 单次 dump 拿 bounds 与护栏 ----
+    # 实测根因：『缺货登记』标签晚于票档框渲染；u2 文本计数 ~48ms/轮，
+    # 计数在 ≥0.8s 窗口内不变且 SKU 驻留 ≥1.2s 才认定标签已定，然后 dump 一次。
+    last_tag, changed_at = None, time.monotonic()
+    sku_entered_at = time.monotonic()
+    settled = False
+    while time.monotonic() < sku_entered_at + 5.0:
+        c = d(text="缺货登记").count
+        now = time.monotonic()
+        if c != last_tag:
+            last_tag, changed_at = c, now
+        elif now - changed_at >= 0.8 and now - sku_entered_at >= 1.2:
+            settled = True
+            break
+        time.sleep(0.05)
+    root, rep = r.snap("s2_tiers")
+    if not rep["state"].startswith("sku"):
+        r.log(f"STOP: 标签稳定时状态异常（state={rep['state']}）")
+        return 1
+    if not settled:
+        r.log(f"STOP: 票档标签计数未稳定（5s 内 last={last_tag}）")
         return 1
     all_tiers, cands = tier_candidates(root)
     if len(cands) != 1:
         r.log(f"STOP: 在售票档候选 {len(cands)}/{len(all_tiers)} ≠ 1（保守规则不盲选）")
         return 1
-    r.log(f"s2: 票档共 {len(all_tiers)}，在售候选 1（签名稳定 {sig_state['hits']} 轮）")
+    r.log(f"s2: 票档共 {len(all_tiers)}，缺货标记 {last_tag}，在售候选 1（标签稳定）")
     r.tap(cands[0], "在售票档")
-    # 不再中间检查“仍在 SKU 页”：下一步确定按钮像素检查本身兼作状态验证
-    # 两步制：确定按钮亮橙才点（决策点，像素验证）
-    root, rep = r.wait_until(
-        lambda rt, p: p["cta"].get("likely_active") is True,
-        "s2_waitconfirm", timeout=3.0, poll_interval=POLL_FAST, pixel=True,
-    )
-    if root is None:
-        r.log(f"STOP: 确定按钮未亮橙（mean={rep['cta'].get('mean_rgb')}）")
+    # 快路径：确定按钮亮橙用仅截图像素轮询（~146ms/轮），bounds 来自刚拿的 dump
+    confirm_bounds = rep["cta"]["container_bounds"]
+    def _confirm_bright():
+        res = probe.pixel_check_cta(d.screenshot(), confirm_bounds) or {}
+        return res.get("likely_active") is True
+    if not r.fast_poll(_confirm_bright, "s2_confirmpix", timeout=3.0):
+        r.log("STOP: 确定按钮未亮橙（仅截图轮询超时）")
         return 1
-    allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
+    allow, note = cta_text_guard(root, confirm_bounds)
     if not allow:
         r.log(f"STOP: 确定按钮文案护栏拦截（{note}）")
         return 1
-    r.tap(rep["cta"]["container_bounds"], "SKU 确定按钮")
-    root, rep = r.wait_until(
-        lambda rt, p: p["state"] == "order_confirm_page", "s2_after",
-        timeout=2.5, poll_interval=POLL_FAST,
-    )
-    if root is None:
-        r.log(f"STOP: 确定后未到订单页（state={rep['state']}）")
+    r.tap(confirm_bounds, "SKU 确定按钮")
+    # 快路径：订单页标记（上游 _wait_for_submit_ready 同款 checkbox ID）
+    chk = d(resourceId="cn.damai:id/checkbox")
+    if not r.fast_poll(lambda: chk.exists, "s2_orderpoll", timeout=3.0):
+        r.log("STOP: 确定后订单页标记未出现（未跳转或页面结构变化）")
+        return 1
+    root, rep = r.snap("s2_after")
+    if rep["state"] != "order_confirm_page":
+        r.log(f"STOP: 确定后状态异常（state={rep['state']}）")
         return 1
     r.log("s2: 到达订单确认页")
 
