@@ -5,7 +5,7 @@
 # 目标演出
 performance:
   name: ""                # 演出名称（仅用于人工核对，脚本以页面状态为准）
-  url_or_keyword: ""      # 猫眼 App 内的演出关键词或用户确认的目标标识
+  url_or_keyword: ""      # 大麦 App 内的演出关键词或用户确认的目标标识
 
 # 期望的场次与票档（按优先级排序，全部不匹配则停止而不是降级购买）
 sessions:
@@ -14,12 +14,12 @@ sessions:
     price_tier: ""        # 票档名称或价格，如 "看台 380元"
     quantity: 1           # 张数；须与 observers 数量一致
 
-# 观演人（必须与用户在猫眼 App 中已维护的观演人姓名一致；真实值只填本地文件）
+# 观演人（必须与用户在大麦 App 中已维护的观演人姓名一致；真实值只填本地文件）
 observers: []
 
 # 调度
 schedule:
-  mode: on_sale           # on_sale | stock_monitor
+  mode: probe             # probe | on_sale；首轮仅做只读探测
   on_sale_at: ""          # 开售时刻，ISO 8601，如 2026-12-01T12:00:00+08:00
   max_attempts: 3         # 最大尝试次数
   attempt_window_seconds: 300   # 重试时间窗口
@@ -29,7 +29,7 @@ schedule:
 
 # 运行
 runtime:
-  platform: maoyan        # 当前先做猫眼；大麦真机路线暂缓
-  device_serial: emulator-5554  # 只连接本项目的一台 AVD
-  submit_order: false     # 首版停在订单确认页；真实提交单独验收
+  platform: damai         # 当前使用实体安卓手机上的大麦 App
+  device_serial: ""       # 从 adb devices 获取；真实序列号只填 config.local.yaml
+  submit_order: false     # 首版只读探测；真实提交单独验收
   notify: log             # log | （后续可扩展桌面通知）

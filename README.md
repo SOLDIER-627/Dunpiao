@@ -1,13 +1,14 @@
 # dunpiao 蹲票
 
-目标：在用户自己的账号上辅助购买演出票。**当前先做猫眼**：用户报告猫眼 App 能登录，先恢复一台 Android 15 ARM64 本地模拟器并独立验证该设备的登录态；真实订单尚未实测。
+目标：在用户自己的账号上辅助购买演出票。**当前先做大麦实体安卓手机**：以 HaTickets Mobile 为主代码基线，结合其他开源实现并按真机实测改造。猫眼作为后续真机适配。
 
-当前主线是单台 Google Play AVD 上的猫眼 App。先人工登录、采集脱敏页面，再做可停止的单账号 Demo。大麦 USB 真机方案暂缓。
+2026-11-18 已只读核对 USB 连接与原有登录态；Python 3.12 隔离环境已建，`--probe` 页面探测尚未执行。下一阶段由 Pi 编码，见上级 Ticket 工作区的[交接文档](../docs/architecture/Pi编码交接_2026-11-18.md)。真实订单未验证。
 
-- [猫眼模拟器方案](docs/architecture/2026-11-16-maoyan-emulator-plan.md)
-- [猫眼开源实现核查](docs/research/2026-11-16-maoyan-open-source-review.md)
+- [HaTickets 真机接入方案](docs/architecture/2026-11-17-hatickets-real-phone-plan.md)
+- [HaTickets 开源核查](docs/research/2026-11-17-hatickets-real-phone-review.md)
+- [多仓融合与代码改造](docs/research/2026-11-17-multi-repo-integration.md)
 - [任务清单](docs/plan/tasks.md)
-- [模拟器使用](docs/setup/2026-11-16-maoyan-emulator-setup.md)
-- [USB 真机大麦候选方案](docs/architecture/2026-11-16-usb-real-phone-plan.md)
+- [USB 首轮接入清单](docs/setup/2026-11-17-hatickets-usb-checklist.md)
+- [历史路线归档](ARCHIVE.md)
 
-先前大麦本地模拟器与雷电云失败记录归档于上级 Ticket 工作区；新猫眼 AVD 不继承旧数据。账号登录、短信验证和支付由用户本人完成；不保存密码、验证码或证件信息。默认停在订单提交前，设备断线和未知页面时安全退出。
+大麦模拟器、雷电云与猫眼模拟器尝试已归档于上级 Ticket 工作区。账号登录、短信验证和支付由用户本人完成；不保存密码、验证码或证件信息。首轮 `--probe` 停在购票入口前，设备断线和未知页面时安全退出。
