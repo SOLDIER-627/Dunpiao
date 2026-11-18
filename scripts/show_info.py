@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.dunpiao import probe  # noqa: E402
+from src.dunpiao import maoyan  # noqa: E402
 from src.dunpiao import selectors as S  # noqa: E402
 
 FLOWLAYOUT = "cn.damai:id/project_detail_perform_price_flowlayout"
@@ -137,7 +138,10 @@ def extract(root, activity):
 
 def human(r):
     lines = []
-    lines.append(f"页面状态 : {r['state']}  （activity={r['meta']['activity'].rsplit('.', 1)[-1]}）")
+    plat = r.get("meta", {}).get("platform", "damai")
+    lines.append(
+        f"页面状态 : {r['state']}  （{plat}，activity={r['meta']['activity'].rsplit('.', 1)[-1]}）"
+    )
     if r.get("title"):
         lines.append(f"演出     : {r['title']}")
     if r.get("venue"):
@@ -146,13 +150,32 @@ def human(r):
         lines.append(f"演出时间 : {r['show_time']}")
     if r.get("price_range"):
         lines.append(f"价格区间 : {r['price_range']}")
-    cta = r["cta"]
-    lines.append(
-        f"购票 CTA : 容器={'有' if cta['container_present'] else '无'}"
-        f" 按钮={'就绪' if cta['button_ready'] else '不可见'}"
-        f" 文本={cta['button_text'] or '—'} 阻断词={cta['blocked_text'] or '—'}"
-        f" 亮橙={cta['likely_active']}"
-    )
+    cta = r.get("cta") or {}
+    if cta:
+        if "safe_to_click" in cta:  # 猫眼格式
+            lines.append(
+                f"购票 CTA : {cta.get('text')!r} 可点={cta.get('safe_to_click')} "
+                f"阻断词={cta.get('blocked_text') or '—'} 中心={cta.get('center')}"
+            )
+        else:
+            lines.append(
+                f"购票 CTA : 容器={'有' if cta.get('container_present') else '无'}"
+                f" 按钮={'就绪' if cta.get('button_ready') else '不可见'}"
+                f" 文本={cta.get('button_text') or '—'} 阻断词={cta.get('blocked_text') or '—'}"
+                f" 亮橙={cta.get('likely_active')}"
+            )
+    # 猫眼：场次 + 票档
+    if r.get("sessions"):
+        lines.append("场次列表 :")
+        for s in r["sessions"]:
+            lines.append(f"  [{s['index']}] {s['status']:<12} {s['date']!r} bounds={s['bounds']}")
+    if r.get("tiers"):
+        lines.append("票档列表 :")
+        for t in r["tiers"]:
+            lines.append(
+                f"  [{t['index']}] {t['status']:<18} {t.get('name','')!r:<14} "
+                f"¥{t.get('price','')} bounds={t['bounds']}"
+            )
     if r.get("session_items"):
         lines.append(
             "场次项   : " + " | ".join(
@@ -160,14 +183,14 @@ def human(r):
             )
             + "  （自绘无文本，需截图确认选中项；序号即 --session-index）"
         )
-    if r.get("sku_tiers") is not None:
+    if r.get("sku_tiers") is not None and not r.get("tiers"):
         lines.append("票档列表 :")
         for t in r["sku_tiers"]:
             lines.append(
                 f"  [{t['index']}] {t['status']:<18} bounds={t['bounds']} texts={t['texts']}"
             )
-    else:
-        lines.append("票档列表 : （当前页无 SKU 票档容器）")
+    if not r.get("tiers") and r.get("sku_tiers") is None:
+        lines.append("票档列表 : （当前页无票档）")
     if r.get("session_candidates"):
         lines.append("场次线索 : " + " | ".join(c["text"] for c in r["session_candidates"][:10]))
     if r.get("reservation_marker"):
@@ -188,12 +211,18 @@ def main():
     import uiautomator2 as u2
     d = u2.connect(args.serial) if args.serial else u2.connect()
     cur = d.app_current()
+    package = cur.get("package", "")
+    activity = cur.get("activity", "")
     xml = d.dump_hierarchy()
     if args.save_xml:
         Path(args.save_xml).write_text(xml, encoding="utf-8")
         print(f"XML 已存：{args.save_xml}", file=sys.stderr)
     root = ET.fromstring(xml)
-    r = extract(root, cur.get("activity", ""))
+    if package == maoyan.PACKAGE:
+        r = maoyan.extract(root, activity)
+    else:
+        r = extract(root, activity)
+        r["meta"]["platform"] = "damai" if package.startswith("cn.damai") else package
     print(human(r))
     print("\n```json")
     print(json.dumps(r, ensure_ascii=False, indent=2))
