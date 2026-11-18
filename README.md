@@ -112,7 +112,6 @@
 
 ## 文档索引
 
-- 任务台账：[TASKS.md](TASKS.md)（E2E-01~17 全记录）
-- 架构归档：[上游方法重构与坐标缓存](docs/architecture/上游方法重构与坐标缓存归档_2026-11-18.md)、[热路径提速实测](docs/architecture/热路径提速实测与GPT复验交接_2026-11-18.md)
-- 真机方案：[大麦真机端到端脚本方案](docs/architecture/大麦真机端到端脚本方案_2026-11-18.md)、[HaTickets 真机接入](docs/architecture/HaTickets真机接入方案_2026-11-17.md)
+- **原理与流程**：[docs/原理与流程.md](docs/原理与流程.md)（机制、设计纪律、耗时模型、上游对应）
+- 任务台账：[TASKS.md](TASKS.md)（E2E-01~22 逐次实验记录）
 - 新演出向导 skill：`.agents/skills/new-show-setup/SKILL.md`
