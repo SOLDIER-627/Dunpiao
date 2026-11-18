@@ -34,6 +34,9 @@ Dunpiao/
 
 # Full local project snapshots can include ignored diagnostics and Git history
 archive/snapshots/
+# 归档的旧日志/页面样本（体积大，仅本地保留）
+archive/logs-*/
+archive/pagesamples-*/
 
 # 上游参考 checkout（只读，不入库）
 reference/
