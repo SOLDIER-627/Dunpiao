@@ -1,14 +1,15 @@
 # dunpiao 蹲票
 
-目标：在用户自己的账号上辅助购买演出票。**当前先做大麦实体安卓手机**：以 HaTickets Mobile 为主代码基线，结合其他开源实现并按真机实测改造。猫眼作为后续真机适配。
+目标：在用户自己的账号上辅助购买演出票。**当前先做大麦实体安卓手机**：以 HaTickets Mobile 的真机 uiautomator2 代码为主线，结合其他开源仓库的页面与流程经验，并依据本机实测修改。猫眼保留后续适配计划。
 
-2026-11-18 已只读核对 USB 连接与原有登录态；Python 3.12 隔离环境已建，`--probe` 页面探测尚未执行。下一阶段由 Pi 编码，见上级 Ticket 工作区的[交接文档](../docs/architecture/Pi编码交接_2026-11-18.md)。真实订单未验证。
+## 当前路线
 
-- [HaTickets 真机接入方案](docs/architecture/2026-11-17-hatickets-real-phone-plan.md)
-- [HaTickets 开源核查](docs/research/2026-11-17-hatickets-real-phone-review.md)
-- [多仓融合与代码改造](docs/research/2026-11-17-multi-repo-integration.md)
-- [任务清单](docs/plan/tasks.md)
-- [USB 首轮接入清单](docs/setup/2026-11-17-hatickets-usb-checklist.md)
-- [历史路线归档](ARCHIVE.md)
+2026-11-18 已完成真机 USB 授权、HaTickets 上游基线和大麦页面分步实测；独立复核见[GPT 复验报告](docs/research/GPT独立复验_PH04_PH05_2026-11-18.md)。代码来源与背景见[真机设计](docs/architecture/HaTickets真机接入方案_2026-11-17.md)、[多仓融合清单](docs/research/多仓方案融合与HaTickets改造清单_2026-11-17.md)和[任务表](TASKS.md)。
 
-大麦模拟器、雷电云与猫眼模拟器尝试已归档于上级 Ticket 工作区。账号登录、短信验证和支付由用户本人完成；不保存密码、验证码或证件信息。首轮 `--probe` 停在购票入口前，设备断线和未知页面时安全退出。
+当前下一阶段是[大麦真机端到端脚本](docs/architecture/大麦真机端到端脚本方案_2026-11-18.md)：新演出预检、从详情页待命到订单页的无人工流程、订单全字段核对，以及单次提交后在付款页停止。分步流程已有实测；通用单进程脚本尚未完成。
+
+大麦本地模拟器、雷电云及后续猫眼本地模拟器尝试已归档，见[归档索引](archive/README.md)。模拟器软件、镜像和 AVD 已清理；保留官方 ADB 供真机连接。
+
+## 操作与数据
+
+账号登录、短信验证和支付由用户本人完成。项目不保存密码、验证码、完整证件号码，也不实现设备指纹伪装、签名逆向、验证码代解或自动支付。截图与页面层级资料保存在忽略 Git 的本地目录，分享前脱敏。只读 `--probe` 已通过，分步导航已到订单确认页；通用无人介入的单进程脚本尚未完成。

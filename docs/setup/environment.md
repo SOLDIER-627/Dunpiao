@@ -1,19 +1,17 @@
 # 安卓环境记录
 
-2026-11-16，Apple Silicon Mac。仓库内的 `scripts/doctor.py` 可重复执行以下检查。
+> **历史记录：**本地模拟器路线已于 2026-11-16 终止，SDK、镜像和 AVD 已删除。以下操作与路径不再可用；见 [归档说明](../../archive/emulator-2026-11-16/README.md)。
+
+更新：2026-11-16。Apple Silicon Mac；项目内安装 SDK 和 AVD，无需 Android Studio。
 
 | 项目 | 当前结果 |
 |---|---|
-| Python | 3.14.7 |
-| Java | OpenJDK 21.0.12.1 |
-| Android SDK / adb / emulator | 未安装或不在 PATH |
-| Android Studio | 未安装 |
-| 安卓设备 | 未连接 |
+| Android SDK | `/Users/Admin/Desktop/work/Ticket/.android-sdk` |
+| AVD | `Ticket_API35`，Pixel 7 配置 |
+| 系统 | Android 15，ARM64 (`arm64-v8a`)，Google APIs 镜像 |
+| adb / emulator | platform-tools 37.0.1 / emulator 37.2.13 |
+| 设备连接 | `emulator-5554 device`，2026-11-16 已验证 |
+| 大麦 App | `cn.damai` 9.0.38，已安装；登录遭遇“亲，访问被拒绝” |
+| 用户偏好 | 简体中文、屏幕三键、本机键盘；见 `模拟器使用偏好.md` |
 
-官方 Android 下载页提供 Mac ARM 命令行工具，可通过 `sdkmanager` 安装 SDK、模拟器和 ARM64 系统镜像。下载及使用前需接受 Android SDK 许可。官方安装与启动文档：
-
-- [Android Studio / 命令行工具下载](https://developer.android.com/studio/)
-- [Android Studio 安装说明](https://developer.android.com/studio/install)
-- [模拟器命令行说明](https://developer.android.com/studio/run/emulator-commandline)
-
-下一次更新应补充：SDK 路径、工具版本、AVD 名称、Android 版本、`adb devices` 结果，以及大麦 App 在模拟器中的安装/登录验证。账号、验证码和证件信息不得写入此文件。
+一键启动脚本：`scripts/start-emulator.command`。SDK、AVD、运行日志均不入 Git；不要将账号、验证码、证件号写入仓库。登录问题的事实记录在 `pagesamples/emulator-login.md`。

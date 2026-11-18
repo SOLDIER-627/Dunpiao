@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import xml.etree.ElementTree as ET
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,8 +71,8 @@ def step1_to_sku(d) -> int:
     if not cta.get("container_bounds"):
         log("ABORT s1: CTA 容器无 bounds")
         return 1
-    if not cta.get("button_visually_rendered"):
-        log(f"ABORT s1: CTA 像素验证未通过（mean={cta.get('mean_rgb')}）——按钮不可见/置灰，不点击")
+    if not cta.get("button_visually_rendered") or not cta.get("likely_active"):
+        log(f"ABORT s1: CTA 未呈已验证的亮橙态（mean={cta.get('mean_rgb')}，appearance={cta.get('appearance_hint')}），不点击")
         return 1
     x, y = center(cta["container_bounds"])
     log(f"s1: CTA 像素验证通过（mean={cta['mean_rgb']}），坐标点击 ({x},{y})")
@@ -83,7 +84,7 @@ def step1_to_sku(d) -> int:
 
 
 def step2_pick_tier(d) -> int:
-    """SKU 页 → 点击无缺货标签的在售票档（单次）→ 应到订单确认页。"""
+    """SKU 页 → 选票档 → 核对确认按钮亮橙 → 点确定 → 订单确认页。"""
     root, rep = snapshot(d, "s2_sku")
     if not rep["state"].startswith("sku"):
         log(f"ABORT s2: 状态非 sku_page（{rep['state']}）")
@@ -114,6 +115,19 @@ def step2_pick_tier(d) -> int:
     time.sleep(2.5)
     root, rep = snapshot(d, "s2_after")
     log(f"s2: 点击后状态 = {rep['state']}")
+    if rep["state"] != "sku_page":
+        log("ABORT s2: 选票档后未停在 SKU 页，不继续点击")
+        return 1
+    cta = rep["cta"]
+    if not cta.get("container_bounds") or not cta.get("likely_active"):
+        log(f"ABORT s2: 确定按钮未呈已验证的亮橙态（mean={cta.get('mean_rgb')}），不点击")
+        return 1
+    x, y = center(cta["container_bounds"])
+    log("s2: 确定按钮视觉核验通过，点击一次并等待订单页")
+    d.shell(f"input tap {x} {y}")
+    time.sleep(2.5)
+    root, rep = snapshot(d, "s2_after_confirm")
+    log(f"s2: 确定后状态 = {rep['state']}")
     return 0 if rep["state"] == "order_confirm_page" else 1
 
 
@@ -132,8 +146,10 @@ def step3_verify_and_submit(d) -> int:
     if qty != "×1张":
         log(f"ABORT s3: 张数异常（{qty!r} ≠ ×1张）")
         return 1
-    if not total or "780" not in total:
-        log(f"ABORT s3: 总价异常（{total!r}，预期 ¥780）")
+    amount_match = re.fullmatch(r"¥\s*([\d,]+(?:\.\d{1,2})?)", total or "")
+    amount = Decimal(amount_match.group(1).replace(",", "")) if amount_match else None
+    if amount != Decimal("780.00"):
+        log(f"ABORT s3: 总价异常（{total!r}，预期精确金额 ¥780.00）")
         return 1
     # 观演人姓名 vs 配置（不打印姓名本身）
     import json as _json
@@ -144,8 +160,8 @@ def step3_verify_and_submit(d) -> int:
         for n in root.iter("node")
         if (n.get("text") or "").strip() in users
     ]
-    if not page_names:
-        log("ABORT s3: 页面未见配置中的观演人姓名——核对失败")
+    if not users or any(page_names.count(u) != 1 for u in users):
+        log("ABORT s3: 页面观演人与配置未逐一匹配——核对失败")
         return 1
     log(f"s3: 核对通过——观演人匹配配置 {len(page_names)} 条、{qty}、{total}、提交按钮可见")
     log("s3: 【单次授权】点击『立即提交』，此后流程终止，付款交人工")

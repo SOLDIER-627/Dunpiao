@@ -86,6 +86,17 @@ def _looks_like_button(mean_rgb: tuple[float, float, float]) -> bool:
     return r > 170 and b < 160 and (r - b) > 70
 
 
+def _button_appearance(mean_rgb: tuple[float, float, float]) -> str:
+    """保守区分已见过的亮橙/浅橙样本；颜色仅是视觉线索。"""
+    r, g, b = mean_rgb
+    saturation = (max(mean_rgb) - min(mean_rgb)) / max(mean_rgb) if max(mean_rgb) else 0
+    if 200 <= r <= 255 and 75 <= g < 155 and b < 115 and saturation >= 0.6:
+        return "bright_orange"
+    if 200 <= r <= 255 and 155 <= g <= 205 and 100 <= b <= 165:
+        return "muted_orange"
+    return "unknown"
+
+
 def pixel_check_cta(screenshot, bounds: list[int] | None) -> dict | None:
     """对容器区域做像素验证：无障碍树不可见时判断按钮是否视觉存在。
 
@@ -102,10 +113,13 @@ def pixel_check_cta(screenshot, bounds: list[int] | None) -> dict | None:
         return None
     n = len(px)
     mean = (sum(p[0] for p in px) / n, sum(p[1] for p in px) / n, sum(p[2] for p in px) / n)
+    appearance = _button_appearance(mean)
     return {
         "button_visually_rendered": _looks_like_button(mean),
+        "appearance_hint": appearance,
+        "likely_active": appearance == "bright_orange",
         "mean_rgb": [round(v) for v in mean],
-        "method": "container-region mean-color heuristic",
+        "method": "container-region mean-color heuristic; not proof of clickability",
     }
 
 
@@ -126,6 +140,8 @@ def analyze(root: ET.Element, package: str, activity: str | None = None) -> dict
             "button_text": None,
             "button_via_desc": False,
             "button_visually_rendered": None,  # 像素验证：无障碍树不可见但视觉存在
+            "appearance_hint": None,  # 亮橙/浅橙/未知，仅供保守判断
+            "likely_active": None,  # 亮橙样本线索，不等于真实可点击状态
             "blocked_text": None,         # 售罄/未开售等阻断词
         },
         "preset_banner": {"present": False, "text": None},   # 预选入口
