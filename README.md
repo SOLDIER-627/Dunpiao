@@ -9,8 +9,7 @@
 **合规红线**：不做验证码代解、签名逆向、接口直调、代理池、批量注册、自动支付；
 付款永远本人手动；验证/滑块出现即停交人工。自动化操作可能违反平台用户协议，风险自负。
 
-**支持范围**：大麦 App（抢票 + 回流，完整链路）+ 安卓实体手机（USB 调试）+ macOS/Linux；
-猫眼（`rush.py --platform auto` 自动分流）：信息提取 + 抢票前两步已跑通，确认/提交待开售实测（见 [猫眼适配](docs/猫眼适配.md)）；
+**支持范围**：大麦 App + 安卓实体手机（USB 调试）+ macOS/Linux；
 **不支持**支持选座的演出（座位图）、模拟器/云手机（实测风控拒绝）、多账号。
 
 ## 两种模式
@@ -159,7 +158,6 @@ docs/回流模式.md          回流：监听机制、两级面板、刷新节�
 docs/原理与流程.md        机制细节、设计纪律、耗时模型、上游对应
 docs/AI助手配置.md        Skill 使用指南 + 示例提示词
 docs/用途声明与免责.md    用途声明、免责、合规、隐私
-docs/猫眼适配.md          猫眼平台差异与当前能力边界
 scripts/rush.py          抢票入口
 scripts/reflow.py        回流入口
 scripts/show_info.py     页面信息提取（只读）
@@ -167,8 +165,6 @@ src/dunpiao/engine.py    两模式共用执行引擎
 src/dunpiao/reflow.py    回流监听核心
 src/dunpiao/runtime_lock.py  单实例锁
 src/dunpiao/clock_sync.py    开售时钟（抢票用）
-src/dunpiao/maoyan.py    猫眼只读提取（无 resource-id，文本+最近可点击祖先）
-src/dunpiao/maoyan_flow.py  猫眼执行链路（同 5 阶段，只换定位）
 src/dunpiao/{probe,recovery,selectors,coords_cache,show_wizard}.py
 .agents/skills/          新演出录入 / 信息提取 skill
 ```
