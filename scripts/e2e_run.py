@@ -55,6 +55,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.dunpiao import probe  # noqa: E402
+from src.dunpiao import recovery  # noqa: E402
 from src.dunpiao import clock_sync  # noqa: E402
 from src.dunpiao import coords_cache  # noqa: E402
 
@@ -760,11 +761,11 @@ def main() -> int:
     # 「订单已提交/提交中」文本视为仍在推进继续等
     deadline = time.monotonic() + 20.0
     act = ""
-    # 「抢票人数太多/繁忙」类瞬时弹窗（上游 TRANSIENT_ERROR + _RETRY_ACTION_TEXTS
-    # 同类：识别归入瞬时错误，自动点重试按钮恢复；纯页面交互无合规问题）。
-    # 15:00 sandy 实战「收银台未现」的真实原因就是这类弹窗挂在屏上。
-    retry_btn_texts = ("继续尝试", "重新尝试", "再试一次", "点击重试")
-    retry_taps = 0
+    # 瞬时错误弹窗（上游机制移植，src/dunpiao/recovery.py）：~1s 一次 dump
+    # 分类——瞬时标记+本地配对重试控件才点（fail-closed）；验证/待支付弹窗
+    # 即停；相同布局指纹只处理一次。15:00 sandy 实战「收银台未现」的真实
+    # 原因就是「抢票人数太多，请继续尝试」弹窗挂屏。
+    acted_fps: set = set()
     last_popup_check = 0.0
     while time.monotonic() < deadline:
         act = d.app_current().get("activity", "")
@@ -782,18 +783,18 @@ def main() -> int:
             r.mark("cashier")
             r.log(f"RESULT: ✅ 提交成功到达收银台——待用户支付，流程终止")
             return 0
-        # 瞬时弹窗快查（~0.7s 一次，u2 轻查询非 dump）：命中则 shell 点重试
         now = time.monotonic()
-        if retry_taps < 5 and now - last_popup_check >= 0.7:
+        if now - last_popup_check >= 1.0:
             last_popup_check = now
-            for t in retry_btn_texts:
-                btn = d(text=t)
-                if btn.exists:
-                    bb = btn.info.get("bounds") or {}
-                    r.log(f"s5: 瞬时弹窗（{t}），自动点重试恢复（第 {retry_taps + 1} 次）")
-                    shell_taps(d, [center((bb["left"], bb["top"], bb["right"], bb["bottom"]))])
-                    retry_taps += 1
-                    break
+            rec = recovery.recover_transient_failure(
+                d, r.log, max_attempts=1, acted_fingerprints=acted_fps,
+            )
+            if rec["state"] == "manual_verification":
+                r.log("STOP: 提交后出现验证拦截——红线，交人工")
+                return 1
+            if rec["state"] == "pending_order_dialog":
+                r.log("STOP: 提交后出现待支付订单弹窗——交人工（先查大麦待付款）")
+                return 1
         time.sleep(POLL_PAGE)
     r.log(f"STOP: 提交后未检测到收银台（activity={act.split('.')[-1]}）——不盲重试，交人工")
     return 1
