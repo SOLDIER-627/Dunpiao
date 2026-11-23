@@ -225,9 +225,22 @@ def point_on_screen(p, w, h):
 
 
 def shell_taps(d, coords):
-    """上游 batch_shell_taps：多条 input tap 拼进单条 shell 命令。"""
-    if coords:
-        d.shell("; ".join(f"input tap {x} {y}" for x, y in coords))
+    """上游 batch_shell_taps：多条 input tap 拼进单条 shell 命令。
+
+    走 adb 直连（d.adb_device.shell，实测 62ms）而不是 u2 服务（114ms）：
+    开售瞬间 uiautomator 服务可能被页面重绘拖住，adb 通道不受影响。
+    """
+    if not coords:
+        return
+    cmd = "; ".join(f"input tap {x} {y}" for x, y in coords)
+    adb = getattr(d, "adb_device", None)
+    if adb is not None:
+        try:
+            adb.shell(cmd)
+            return
+        except Exception:
+            pass
+    d.shell(cmd)
 
 
 def confirm_page_ready_u2(d) -> bool:
@@ -320,12 +333,19 @@ class Runner:
     def tap(self, bounds, label: str) -> None:
         x, y = center(bounds)
         self.log(f"点击 {label} ({x},{y})")
-        self.d.shell(f"input tap {x} {y}")
+        shell_taps(self.d, [(x, y)])
 
     # ---- Phase 2：入口等待（上游 _wait_for_purchase_entry 0.45s@0.03）----
     def wait_for_purchase_entry(self, timeout: float = 0.45):
+        """入口探测：先只查票价容器一个信号（最便宜、SKU 页必有的锚点）。
+
+        实测每轮查 3 个 marker 时，面板滑入动画期间单轮阻塞 ~0.9s；
+        收敛成 1 个信号后探测本身不再是瓶颈（其余 marker 作兜底）。
+        """
         end = time.monotonic() + timeout
         while time.monotonic() < end:
+            if self.d(resourceId=FLOWLAYOUT).exists:
+                return "sku_page"
             if any(self.d(resourceId=rid).exists for rid in SKU_MARKERS):
                 return "sku_page"
             if confirm_page_ready_u2(self.d):
@@ -492,6 +512,11 @@ def add_common_args(ap) -> None:
         help="测量模式：走到 SKU 页取坐标写缓存即停（不连点不进单）",
     )
     ap.add_argument(
+        "--precapture", action="store_true",
+        help="开售前预抓坐标：CTA→面板→票价/确定坐标→写缓存→BACK，不连点不下单；"
+             "开售后 T0 全程零 dump",
+    )
+    ap.add_argument(
         "--preselect", dest="preselect", action="store_true", default=None,
         help="预约预选已设置：首批只点确定不点票价（抢票默认开，回流默认关）",
     )
@@ -649,6 +674,61 @@ def run(args, mode: str = "rush") -> int:
             # 恢复到详情页后，缓存校验依然成立（屏尺寸/price_index/坐标已验过）
             if cache:
                 cache_ok = True
+        # T0 直点坐标在这里定下来（此刻页面静止，查询安全）；开售瞬间不再查询
+        startup_cta_bounds = None
+        if cache_ok and cache:
+            cx, cy = cache["cta_xy"]
+            startup_cta_bounds = [cx - 1, cy - 1, cx + 1, cy + 1]
+        else:
+            root0, rep0 = r.snap("s0_cta")
+            startup_cta_bounds = rep0["cta"].get("container_bounds")
+            if startup_cta_bounds:
+                r.log(f"s0: CTA 坐标已记（{startup_cta_bounds}）——T0 直点用，开售瞬间零查询")
+
+    # ---- 0.4) 预抓坐标（开售前跑一次，把 SKU 坐标固化进缓存）----
+    # 目的：开售后 T0 全程零 dump。实测进面板后那次 dump 会撞滑入动画，
+    # 多花 0.6s（11:33 演习 0.758s vs 11:12 的 0.173s）。
+    if args.precapture:
+        if platform == "maoyan":
+            r.log("STOP: --precapture 暂只支持大麦（猫眼每轮文本定位）")
+            return 1
+        root_p, rep_p = r.snap("pre_cta")
+        cta_b = rep_p["cta"].get("container_bounds")
+        if not cta_b:
+            r.log("STOP: precapture 未找到详情页 CTA 容器")
+            return 1
+        r.log(f"precapture: CTA {cta_b} → 打开面板")
+        r.tap(cta_b, "precapture CTA")
+        entry_p = r.wait_for_purchase_entry(1.5)
+        if entry_p != "sku_page":
+            r.log(f"STOP: precapture 未进入面板（entry={entry_p}）")
+            return 1
+        price_xy = buy_xy = None
+        for attempt in range(3):
+            root_p, rep_p = r.snap(f"pre_sku_{attempt}")
+            price_xy, buy_xy = r.sku_coords(root_p, r.target_price)
+            if price_xy and buy_xy:
+                break
+            if attempt == 0 and (args.session_index is not None or cfg.get("date")):
+                root_p, _tb = reflow.prepare_tiers(
+                    d, r.log, r.price_index, args.session_index,
+                    date=cfg.get("date"), city=cfg.get("city"),
+                )
+            time.sleep(0.3)
+        if not price_xy or not buy_xy:
+            r.log("STOP: precapture 未测到票价/确定坐标")
+            return 1
+        cxy = center(cta_b)
+        coords_cache.save(ROOT, args.cache_key, {
+            "cta_xy": [cxy[0], cxy[1]],
+            "price_xy": list(price_xy), "buy_xy": list(buy_xy),
+            "screen": [r.w, r.h], "price_index": r.price_index,
+        })
+        r.log(f"RESULT: ✅ 坐标已固化 price={price_xy} buy={buy_xy} "
+              f"cta={cxy}（key={args.cache_key}）——开售时 T0 全程零 dump")
+        d.adb_device.shell("input keyevent 4")
+        time.sleep(0.6)
+        return 0
 
     # ---- 0.5) 开售等待模式（上游 wait_for_sale_start 骨架：clock_sync + lead 轮询）----
     prewarm_ok = False
@@ -688,7 +768,7 @@ def run(args, mode: str = "rush") -> int:
             if remaining <= lead:
                 break
             time.sleep(min(0.05, remaining - lead))
-        prewarm_bounds = None
+        prewarm_bounds = startup_cta_bounds if args.wait_open else None
         if platform == "maoyan":
             while True:
                 remaining = dl.remaining_seconds(time.monotonic())
@@ -698,25 +778,17 @@ def run(args, mode: str = "rush") -> int:
             r.log("wait-open: 到点（猫眼，无 prewarm）")
             prewarm_ok = False
         else:
-            slack_ms = int(max(0.0, dl.remaining_seconds(time.monotonic())) * 1000)
-            if slack_ms < PREWARM_MIN_SLACK_MS:
-                # 上游同款：余量不足直接跳过 prewarm，T0 用缓存坐标直点
-                r.log(f"wait-open: 距开售仅 {slack_ms}ms（<{PREWARM_MIN_SLACK_MS}ms）"
-                      "——跳过 prewarm，T0 用缓存坐标直点")
-                prewarm_ok = False
+            # 开售热路径零设备查询（2026-11-23 两次实战教训）：
+            # T0-3s 做的任何 u2/dumpsys 查询，在页面从预约态翻到开售态期间
+            # 可能阻塞 20-30s（实测 22.8s / 30s+），直接错过开售。
+            # 坐标一律用 s0 阶段（页面静止时）记下的 CTA 坐标。
+            if prewarm_bounds:
+                prewarm_ok = True
+                r.log(f"wait-open: T0 直点就绪（坐标 {prewarm_bounds}，来自 s0；"
+                      "开售瞬间零查询）")
             else:
-                r.log(f"wait-open: 进入 lead 窗口（余量 {slack_ms}ms），"
-                      "prewarm 定向查询（无 dump）")
-                t_warm = time.monotonic()
-                warm = prewarm_probe(d)
-                dur_ms = (time.monotonic() - t_warm) * 1000
-                slow = dur_ms > PREWARM_WARN_DURATION_MS
-                r.log(f"wait-open: prewarm {'就绪' if warm['ready'] else '未就绪'} "
-                      f"耗时 {dur_ms:.0f}ms（{warm['source']}，"
-                      f"CTA={warm['cta_bounds']}）"
-                      + (" [WARN: prewarm 超过 500ms——检查页面是否在重绘]" if slow else ""))
-                prewarm_ok = bool(warm["ready"])
-                prewarm_bounds = warm["cta_bounds"]
+                prewarm_ok = False
+                r.log("wait-open: 无可用 CTA 坐标——T0 后走验证路径")
         while True:
             remaining = dl.remaining_seconds(time.monotonic())
             if remaining <= 0:
@@ -724,9 +796,9 @@ def run(args, mode: str = "rush") -> int:
             time.sleep(min(0.05, remaining))
         r.log("wait-open: 到点，进入点击窗口")
         # T0 直点前廉价闸门（上游 _scheduled_sale_click_gate 思路）：只验 activity
-        if prewarm_ok and "ProjectDetailActivity" not in fast_app_current(d).get("activity", ""):
-            prewarm_ok = False
-            r.log("wait-open: T0 前 activity 变化，放弃直点走验证路径")
+        # 注：上游此处有 _scheduled_sale_click_gate（activity 校验），本实现**去掉**：
+        # T0 那一刻任何设备查询都可能阻塞（2026-11-23 实测 20-30s），而坐标来自
+        # s0 阶段、点击是盲点，多一次校验只增加错过开售的风险。
 
     # ---- 回流票监听模式外层轮次（上游 run_with_retry 轮次模型）----
     # 非回流模式恰好跑一轮；回流模式下本轮提交后售罄（可重试失败）→ 回监听继续蹲；
@@ -872,6 +944,7 @@ def run(args, mode: str = "rush") -> int:
             r.log("STOP: CTA 点击后未进入 SKU/订单页")
             return 1
         r.mark(f"entry_{entry}")
+        r.marks_entry = time.monotonic()
         if entry == "order_confirm_page":
             entered_order = True
             r.log("s1: 直达订单确认页（未展开 SKU）")
@@ -916,8 +989,11 @@ def run(args, mode: str = "rush") -> int:
                 else:
                     r.log(f"s2: 缓存坐标 票价{price_xy} 确定{buy_xy}（跳过 SKU dump）")
                 # 实测（2026-11-18）：入口确认后 ~1ms 连点被页面吞掉（3/4 失败），
-                # dump 路径天然时延 0.35-1.2s 从未失败；补 0.4s 驻留落到已验证时延区
-                time.sleep(0.4)
+                # dump 路径天然时延 0.35-1.2s 从未失败；补足到「入口后 0.4s」驻留，
+                # 入口探测本身已耗时则不再等（避免 0.9s 探测 + 0.4s 驻留叠加）
+                elapsed = time.monotonic() - getattr(r, "marks_entry", 0.0)
+                if elapsed < 0.4:
+                    time.sleep(0.4 - elapsed)
                 r.mark("settle_done")
             if price_xy is None:
                 root, rep = r.snap("s2_sku")
