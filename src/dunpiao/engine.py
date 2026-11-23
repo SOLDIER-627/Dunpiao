@@ -45,6 +45,7 @@ from src.dunpiao import coords_cache  # noqa: E402
 from src.dunpiao import reflow  # noqa: E402
 from src.dunpiao import runtime_lock  # noqa: E402
 from src.dunpiao import maoyan as MY  # noqa: E402
+from src.dunpiao.selectors import CTA_CONTAINER_ID  # noqa: E402
 
 POLL_PAGE = 0.2   # 页面态轮询间隔（上游 wait_for_page_state 默认）
 POLL_FAST = 0.05  # 就绪检查轮询间隔（上游 poll_until 默认）
@@ -80,9 +81,83 @@ def _maoyan_order_step(d, r, root_m, info, args) -> int:
     time.sleep(2.0)
     root_after, _ = r.snap("s6_maoyan")
     after = MY.page_info(root_after)
-    r.log(f"s4: 提交后 activity={d.app_current().get('activity')} "
+    r.log(f"s4: 提交后 activity={fast_app_current(d).get('activity')} "
           f"（只读，不再点击）")
     return 0
+
+
+_FOCUS_RE = re.compile(r"mCurrentFocus=Window\{[^ ]+ [^ ]+ (?P<pkg>[^\s/]+)/(?P<act>[^\s}]+)")
+
+
+# 开售前 prewarm 保护（上游 sale_waiter：_PREWARM_MIN_SLACK_MS=1200 /
+# _PREWARM_WARN_DURATION_MS=500）
+PREWARM_MIN_SLACK_MS = 1200
+PREWARM_WARN_DURATION_MS = 500
+
+
+def prewarm_probe(d) -> dict:
+    """开售前只读快照——**只用定向选择器查询，绝不 dump_hierarchy**。
+
+    上游 _capture_presale_readiness 同构：一次廉价查询换 CTA 坐标，
+    不做整树 dump。原因（2026-11-23 11:00 胡彦斌场实测）：dump_hierarchy
+    会等 UI 空闲，开售瞬间页面从预约态翻到开售态（重绘+动画+系统浮窗），
+    单次 dump 阻塞 22.8s，出点后 20s 才点 CTA，票已售罄。
+    """
+    info = {"ready": False, "cta_bounds": None, "source": "selector",
+            "activity": None, "blocked_text": None}
+    try:
+        act = fast_app_current(d)
+        info["activity"] = act.get("activity")
+        if "ProjectDetailActivity" not in (act.get("activity") or ""):
+            info["source"] = "activity_mismatch"
+            return info
+    except Exception:
+        info["source"] = "activity_error"
+        return info
+    # 单次 .info 同时拿 bounds + text + contentDescription（实测 .info 126ms，
+    # 拆成 exists+两次 .info 是 3 个 roundtrip ≈ 370ms）
+    try:
+        node = d(resourceId=CTA_CONTAINER_ID).info
+    except Exception:
+        info["source"] = "container_missing"
+        return info
+    b = (node or {}).get("bounds") or {}
+    bounds = [b.get("left"), b.get("top"), b.get("right"), b.get("bottom")]
+    if None in bounds:
+        info["source"] = "bounds_missing"
+        return info
+    info["cta_bounds"] = bounds
+    # 文案护栏（无文本 = Canvas/Bricks 自绘，按上游 canvas 路径放行）
+    txt = ((node.get("text") or "") + " " + (node.get("contentDescription") or "")).strip()
+    if txt:
+        blocked = next((w for w in ("已售罄", "缺货登记", "即将开抢", "已结束") if w in txt), None)
+        if blocked:
+            info["blocked_text"] = blocked
+            info["source"] = "text_blocked"
+            return info
+    info["ready"] = True
+    info["source"] = "text" if txt else "canvas(no_text)"
+    return info
+
+
+def fast_app_current(d) -> dict:
+    """前台 activity 快查（~90ms）。
+
+    uiautomator2 的 app_current() 走 `dumpsys window windows`，本机 HyperOS 实测
+    5.5s（该命令返回空后还会再跑一次 `dumpsys activity activities`）；而
+    `dumpsys window displays | grep mCurrentFocus` 只要 ~90ms，输出同一信息。
+    """
+    try:
+        out = d.shell(["sh", "-c", "dumpsys window displays | grep -m1 mCurrentFocus"]).output
+        m = _FOCUS_RE.search(out or "")
+        if m:
+            return {"package": m.group("pkg"), "activity": m.group("act")}
+    except Exception:
+        pass
+    try:
+        return fast_app_current(d)
+    except Exception:
+        return {"package": None, "activity": ""}
 
 
 def cfg_serial_hint() -> str:
@@ -205,7 +280,7 @@ class Runner:
         xml = self.d.dump_hierarchy()
         (self.out / f"{tag}.xml").write_text(xml, encoding="utf-8")
         root = ET.fromstring(xml)
-        rep = probe.analyze(root, "cn.damai", self.d.app_current().get("activity", ""))
+        rep = probe.analyze(root, "cn.damai", fast_app_current(self.d).get("activity", ""))
         cta = rep["cta"]
         if pixel and cta.get("container_present") and cta.get("container_bounds"):
             img = self.d.screenshot()
@@ -506,7 +581,7 @@ def run(args, mode: str = "rush") -> int:
               "先停掉它（kill <pid>）再重跑")
         return 1
     d = u2.connect(args.serial)
-    platform = "maoyan" if d.app_current().get("package") == MY.PACKAGE else "damai"
+    platform = "maoyan" if fast_app_current(d).get("package") == MY.PACKAGE else "damai"
     cfg = json.loads(re.sub(r"//[^\n]*", "", (ROOT / "config.local.jsonc").read_text("utf-8")))
     # 上游 orchestrator.py:922 —— 关闭 u2 内部等待，避免隐式阻塞
     d.settings["wait_timeout"] = 0
@@ -551,7 +626,7 @@ def run(args, mode: str = "rush") -> int:
         )
         if cache and not cache_ok:
             r.log("s0: 坐标缓存校验未过（屏尺寸/price_index/坐标屏内）——走 dump 路径")
-        if cache_ok and "ProjectDetailActivity" in d.app_current().get("activity", ""):
+        if cache_ok and "ProjectDetailActivity" in fast_app_current(d).get("activity", ""):
             r.log("s0: 详情页（activity 快查）+ 缓存校验通过，跳过 dump")
         else:
             cache_ok = False
@@ -613,6 +688,7 @@ def run(args, mode: str = "rush") -> int:
             if remaining <= lead:
                 break
             time.sleep(min(0.05, remaining - lead))
+        prewarm_bounds = None
         if platform == "maoyan":
             while True:
                 remaining = dl.remaining_seconds(time.monotonic())
@@ -622,19 +698,25 @@ def run(args, mode: str = "rush") -> int:
             r.log("wait-open: 到点（猫眼，无 prewarm）")
             prewarm_ok = False
         else:
-            r.log(f"wait-open: 进入 lead 窗口（{args.countdown_lead_ms}ms），prewarm 取基线快照")
-        if platform != "maoyan":
-            root, rep = r.snap("s1_prewarm", pixel=True)
-            if not rep["cta"].get("container_present"):
-                r.log("STOP: prewarm 时 CTA 容器不可见——页面结构异常，不盲等")
-                return 1
-            prewarm_ok = rep["cta"].get("likely_active") is True
-            allow, note = cta_text_guard(root, rep["cta"]["container_bounds"])
-            if not allow:
+            slack_ms = int(max(0.0, dl.remaining_seconds(time.monotonic())) * 1000)
+            if slack_ms < PREWARM_MIN_SLACK_MS:
+                # 上游同款：余量不足直接跳过 prewarm，T0 用缓存坐标直点
+                r.log(f"wait-open: 距开售仅 {slack_ms}ms（<{PREWARM_MIN_SLACK_MS}ms）"
+                      "——跳过 prewarm，T0 用缓存坐标直点")
                 prewarm_ok = False
-                r.log(f"wait-open: prewarm 文案护栏拦截（{note}）——T0 后走验证路径")
             else:
-                r.log(f"wait-open: prewarm 就绪（likely_active={prewarm_ok}，{note}）")
+                r.log(f"wait-open: 进入 lead 窗口（余量 {slack_ms}ms），"
+                      "prewarm 定向查询（无 dump）")
+                t_warm = time.monotonic()
+                warm = prewarm_probe(d)
+                dur_ms = (time.monotonic() - t_warm) * 1000
+                slow = dur_ms > PREWARM_WARN_DURATION_MS
+                r.log(f"wait-open: prewarm {'就绪' if warm['ready'] else '未就绪'} "
+                      f"耗时 {dur_ms:.0f}ms（{warm['source']}，"
+                      f"CTA={warm['cta_bounds']}）"
+                      + (" [WARN: prewarm 超过 500ms——检查页面是否在重绘]" if slow else ""))
+                prewarm_ok = bool(warm["ready"])
+                prewarm_bounds = warm["cta_bounds"]
         while True:
             remaining = dl.remaining_seconds(time.monotonic())
             if remaining <= 0:
@@ -642,7 +724,7 @@ def run(args, mode: str = "rush") -> int:
             time.sleep(min(0.05, remaining))
         r.log("wait-open: 到点，进入点击窗口")
         # T0 直点前廉价闸门（上游 _scheduled_sale_click_gate 思路）：只验 activity
-        if prewarm_ok and "ProjectDetailActivity" not in d.app_current().get("activity", ""):
+        if prewarm_ok and "ProjectDetailActivity" not in fast_app_current(d).get("activity", ""):
             prewarm_ok = False
             r.log("wait-open: T0 前 activity 变化，放弃直点走验证路径")
 
@@ -655,7 +737,7 @@ def run(args, mode: str = "rush") -> int:
         if reflow_round:
             # 二次回流：从售罄页 BACK 回详情页，Phase1 重新进 SKU（重进即刷新库存）
             for _ in range(4):
-                act = d.app_current().get("activity", "")
+                act = fast_app_current(d).get("activity", "")
                 if "projectdetail" in act.lower():
                     break
                 d.shell("input keyevent 4")
@@ -741,7 +823,10 @@ def run(args, mode: str = "rush") -> int:
         entry = None
         fresh_cta = None
         if args.wait_open and prewarm_ok:
-            cta_b = rep["cta"]["container_bounds"]
+            cta_b = prewarm_bounds or (cache["cta_xy"] and [
+                cache["cta_xy"][0] - 1, cache["cta_xy"][1] - 1,
+                cache["cta_xy"][0] + 1, cache["cta_xy"][1] + 1,
+            ])
             r.tap(cta_b, "详情页购票 CTA（prewarm T0 直点）")
             r.mark("cta_tap")
             fresh_cta = center(cta_b)
@@ -990,7 +1075,7 @@ def run(args, mode: str = "rush") -> int:
         # dump 零额外耗时）：验证/待支付弹窗即停不提交；瞬时错误先恢复再提交。
         # 防的是「弹窗已在屏上时盲点提交」（点击会落在弹窗层而非提交按钮）----
         pre = recovery.inspect_transient_failure(
-            root, "cn.damai", d.app_current().get("activity", "")
+            root, "cn.damai", fast_app_current(d).get("activity", "")
         )
         # 授权弹窗（上游 probe_consent_dialog 同构：资源 ID 直查，非文本）
         if any(
@@ -1057,7 +1142,7 @@ def run(args, mode: str = "rush") -> int:
         captcha_markers = ("滑块", "人机验证", "安全验证", "验证码")
         last_dump = 0.0
         while time.monotonic() < deadline:
-            act = d.app_current().get("activity", "")
+            act = fast_app_current(d).get("activity", "")
             act_key = act.casefold()
             now = time.monotonic()
             # 只读观察：~0.5s 一次 dump 取全页文本，分类但不点击（上游 0.3s 粒度）
