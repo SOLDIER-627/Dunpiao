@@ -754,7 +754,10 @@ def run(args, mode: str = "rush") -> int:
         anchor_mono = time.monotonic()
         target = naive.replace(tzinfo=anchor_wall.tzinfo)
         if target <= anchor_wall:
-            target += datetime.timedelta(days=1)
+            # 开售时刻已过：不再归到明天（2026-11-25 演习踩坑：采样耗时 17s，
+            # 10:10 被归到次日 10:10，静默挂 24h）。HH:MM 一律指今天，
+            # 已过就立即开跑（晚到就抢，不等明天）
+            r.log(f"clock: 开售时刻已过 {(anchor_wall - target).total_seconds():.0f}s——立即开跑")
         dl = clock_sync.build_monotonic_sale_deadline(
             target, anchor_wall, anchor_mono, obs,
         )
