@@ -402,7 +402,9 @@ class Runner:
         shell_end = time.monotonic() + 0.9
         while time.monotonic() < shell_end:
             shell_taps(self.d, taps)
-            poll_end = min(shell_end, time.monotonic() + 0.9)
+            # 0.35s 内未见确认页就补一击：T0 首击可能撞上翻转死帧/慢响应
+            # （2026-11-25 实测首击未确认 → 拖 +1.3s 进重测轮）；确认页出现即停
+            poll_end = min(shell_end, time.monotonic() + 0.35)
             while time.monotonic() < poll_end:
                 if confirm_page_ready_u2(self.d):
                     return True
@@ -903,6 +905,10 @@ def run(args, mode: str = "rush") -> int:
             r.mark("cta_tap")
             fresh_cta = center(cta_b)
             r.mark("s0_ready")
+            # T0 驻留锚点 = CTA 点击时刻（不是入口确认时刻）：翻转期入口探测本身
+            # 要 0.3-0.5s，再叠加 0.4s 驻留会把首击拖到 T+0.9（2026-11-25 实测）。
+            # 驻留从点击起算 0.4s，探测剩余时间自然覆盖；首击若被吞由连点补击兜住
+            r.marks_entry = time.monotonic()
             entry = r.wait_for_purchase_entry(3.0)
             if entry is None:
                 r.log("wait-open: T0 直点未进页，回退 Phase1 验证路径")
@@ -944,7 +950,8 @@ def run(args, mode: str = "rush") -> int:
             r.log("STOP: CTA 点击后未进入 SKU/订单页")
             return 1
         r.mark(f"entry_{entry}")
-        r.marks_entry = time.monotonic()
+        if not getattr(r, "marks_entry", None):
+            r.marks_entry = time.monotonic()
         if entry == "order_confirm_page":
             entered_order = True
             r.log("s1: 直达订单确认页（未展开 SKU）")
@@ -990,7 +997,8 @@ def run(args, mode: str = "rush") -> int:
                     r.log(f"s2: 缓存坐标 票价{price_xy} 确定{buy_xy}（跳过 SKU dump）")
                 # 实测（2026-11-18）：入口确认后 ~1ms 连点被页面吞掉（3/4 失败），
                 # dump 路径天然时延 0.35-1.2s 从未失败；补足到「入口后 0.4s」驻留，
-                # 入口探测本身已耗时则不再等（避免 0.9s 探测 + 0.4s 驻留叠加）
+                # 入口探测本身已耗时则不再等（避免 0.9s 探测 + 0.4s 驻留叠加）。
+                # T0 直点路径 marks_entry 已在 CTA 点击时刻赋值（见 Phase1+2）
                 elapsed = time.monotonic() - getattr(r, "marks_entry", 0.0)
                 if elapsed < 0.4:
                     time.sleep(0.4 - elapsed)
@@ -1128,8 +1136,11 @@ def run(args, mode: str = "rush") -> int:
                 (n.get("text") or "").strip() for n in root.iter("node")
             ]
             checks["session_date"] = args.expect_session_date
+            # 归一化后再比：配置写 11-28、订单页显示 2026.11.28 也算过
+            # （2026-11-25 实战因横杠/点号不一致拦停正确订单）
+            norm = lambda s: (s or "").replace("-", ".")
             checks["session_date_match"] = any(
-                args.expect_session_date in t for t in order_texts
+                norm(args.expect_session_date) in norm(t) for t in order_texts
             )
         ok = all((checks["submit_button_visible"], checks["quantity"] == "×1张",
                   checks["amount_match"], checks["attendees_match"],
